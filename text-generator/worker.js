@@ -16,9 +16,9 @@ onmessage = function(evt) {
         let minConfig = {
 			base_channels: 32,
 			out_channels: 1,
-			channels_mult: [1, 1, 2, 2],
-			num_blocks: [2, 2, 2, 2],
-			use_attentions: [false, false, false, false, false]
+			channels_mult: [1, 1, 2],
+			num_blocks: [2, 2, 2],
+			use_attentions: [false, false, false, false]
 		};
 
 		loadUNet(evt.data.path, minConfig).then(unet => {
