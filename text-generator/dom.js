@@ -31,6 +31,10 @@ function advancedImageShow(image){
 }
 
 generateBnElem.addEventListener('click', evt => {
+    if (!globalObj.unetPrepared){
+        alert("The model is not prepared.");
+        return;
+    }
     progressbarElem.max = stepsSlideElem.value;
     progressbarElem.value = 0;
     globalObj.worker.postMessage({
