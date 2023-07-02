@@ -28,7 +28,11 @@
                     <input id="width-slide-display" type="text" size="1" value="48" disabled/>
                 </div>
                 <div class="tool-container">
-                    <button id="generate-bn">Generate</button>
+                    <input type="radio" id="radio-cpu" name="device" value="cpu"> cpu
+                    <input type="radio" id="radio-gpu" name="device" value="webgl" checked> gpu
+                </div>
+                <div class="tool-container">
+                    <button id="generate-bn">Generate</button> &nbsp; <button id="reload-model-bn">Reload Model</button>
                 </div>
             </div>
         </div>

@@ -78,18 +78,19 @@ async function main(){
 		// imshow(undefined, gen_img);
 		// gen_img.print();
 		globalObj.unetPrepared = false;
+		globalObj.isGenerating = false;
 		let worker = new Worker("worker.js");
 		globalObj.worker = worker;
-		globalObj.worker.postMessage({
-			action: 'load model',
-			path: 'text-gen-light-wo-trans.json'
-		});
+		
+		reloadModelBnElem.click();
+
 		globalObj.worker.onmessage = evt => {
 			if(evt.data.action === "load model"){
 				if (evt.data.status === 0){
 					globalObj.unetPrepared = true;
 				} else alert(evt.data.message);
 			}else if (evt.data.action === "generate image"){
+				globalObj.isGenerating = false;
 				if (evt.data.status === 0){
 					advancedImageShow(evt.data.image);
 				} else alert(evt.data.message);

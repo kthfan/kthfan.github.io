@@ -7,7 +7,11 @@ let progressbarElem = document.getElementById('progressbar');
 let stepsSlideElem = document.getElementById('steps-slide');
 let heightSlideElem = document.getElementById('height-slide');
 let widthSlideElem = document.getElementById('width-slide');
+
+let radioCpuElem = document.getElementById('radio-cpu');
+let radioGpuElem = document.getElementById('radio-gpu');
 let generateBnElem = document.getElementById('generate-bn');
+let reloadModelBnElem = document.getElementById('reload-model-bn');
 
 let stepsSlideDisplayElem = document.getElementById('steps-slide-display');
 let heightSlideDisplayElem = document.getElementById('height-slide-display');
@@ -35,6 +39,10 @@ generateBnElem.addEventListener('click', evt => {
         alert("The model is not prepared.");
         return;
     }
+    if (globalObj.isGenerating){
+        return;
+    }
+    globalObj.isGenerating = true;
     progressbarElem.max = stepsSlideElem.value;
     progressbarElem.value = 0;
     globalObj.worker.postMessage({
@@ -42,6 +50,26 @@ generateBnElem.addEventListener('click', evt => {
         steps: stepsSlideElem.value,
         height: Number.parseInt(heightSlideElem.value),
         width: Number.parseInt(widthSlideElem.value),
+    });
+});
+
+reloadModelBnElem.addEventListener('click', evt=>{
+    globalObj.worker.postMessage({
+        action: 'load model',
+        path: 'text-gen-light-wo-trans.json'
+    });
+});
+
+radioCpuElem.addEventListener('change', () => {
+    globalObj.worker.postMessage({
+        action: 'set backend',
+        backend: 'cpu'
+    });
+});
+radioGpuElem.addEventListener('change', () => {
+    globalObj.worker.postMessage({
+        action: 'set backend',
+        backend: 'webgl'
     });
 });
 
