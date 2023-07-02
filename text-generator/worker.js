@@ -13,15 +13,15 @@ onmessage = function(evt) {
 	// tf.engine().startScope();
 	
     if (evt.data.action === "load model"){
-        let lightwoTransConfig = {
+        let minConfig = {
 			base_channels: 32,
 			out_channels: 1,
-			channels_mult: [1, 1, 2, 4],
+			channels_mult: [1, 1, 2, 2],
 			num_blocks: [2, 2, 2, 2],
 			use_attentions: [false, false, false, false, false]
 		};
 
-		loadUNet(evt.data.path, lightwoTransConfig).then(unet => {
+		loadUNet(evt.data.path, minConfig).then(unet => {
             globalObj.unet = unet;
             postMessage({action: evt.data.action, message: "The model is loaded.", status: 0});
         }).catch(err => {

@@ -56,7 +56,7 @@ generateBnElem.addEventListener('click', evt => {
 reloadModelBnElem.addEventListener('click', evt=>{
     globalObj.worker.postMessage({
         action: 'load model',
-        path: 'text-gen-light-wo-trans.json'
+        path: 'text-gen-min.json'
     });
 });
 
