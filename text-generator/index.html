@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Text Generator</title>
+        <meta charset="UTF-8"/>
+        <meta http-equiv="CACHE-CONTROL" content="NO-CACHE"/>
+        <link rel=stylesheet type="text/css" href="main.css">
+    </head>
+    <body>
+        <div id="app">
+            <div id="image-container">
+                <canvas id="canvas" width="28" height="28"></canvas>
+            </div>
+            <div id="toolbar-container">
+                <div class="tool-container">
+                    <span>Progress: </span> <progress id="progressbar" value="0" min="0" max="20"> 0% </progress>
+                </div>
+                <div class="tool-container">
+                    <span>Steps: </span> <input id="steps-slide" type="range", min="0", max="100", value="10"/> 
+                    <input id="steps-slide-display" type="text" size="1" value="10" disabled/>
+                </div>
+                <div class="tool-container">
+                    <span>Height: </span> <input id="height-slide" type="range", min="8", max="80", step="8", value="48"/>
+                    <input id="height-slide-display" type="text" size="1" value="48" disabled/>
+                </div>
+                <div class="tool-container">
+                    <span>Width: </span> <input id="width-slide" type="range", min="8", max="80", step="8", value="48"/>
+                    <input id="width-slide-display" type="text" size="1" value="48" disabled/>
+                </div>
+                <div class="tool-container">
+                    <button id="generate-bn">Generate</button>
+                </div>
+            </div>
+        </div>
+        
+    </body>
+    <script src="utils.js"></script>
+    <script src="dom.js"></script>
+    <script src="index.js"></script>
+</html>
