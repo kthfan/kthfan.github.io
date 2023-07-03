@@ -1,0 +1,429 @@
+
+<html>
+
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no;"/>
+    <title>blueball 1.6</title>
+    <script>
+    function Initialize(args){
+     this.pos = args.pos?args.pos:function(arg){return [arg.x,arg.y];};
+     this.speed = args.speed?args.speed:function(arg){return 5;};
+     this.shape = args.shape?args.shape:function(arg){return Cir;};
+     this.size = args.size?args.size:function(arg){
+            var g = arg.g?arg.g:arg;
+            var size = g==Cir?30:g==Rect?50:50;
+            return size;
+        };
+     this.color = args.color?args.color:function(arg){return "#AAAAAA";};
+     this.id = args.id?args.id:0;
+    }
+    function GraphicsFactory(args){
+     this.graphics = args.graphics?args.graphics:new Set();
+     this.init = args.init?args.init:new Initialize();
+     this.lim = args.lim?args.lim:function(arg){false;};//arg:{x,y}
+     this.destroy = args.destroy;
+     this.track = args.track;
+    this.createGraphic = function(args){
+        var init = this.init;
+        var pos = init.pos(args.pos);
+        var shp = init.shape(args.shp);
+        var g = args.size?args.size:shp;
+        var graphic = new shp(pos[0],pos[1],init.size(g),init.color());
+        graphic.track = this.track(args.track);
+            var k = args.k?args.k:graphic;
+            this.graphics[k] = graphic;
+        return graphic;
+    }
+    
+    }
+    function Cir(x,y,r,color){
+     this.x = x;
+     this.y = y;
+     this.r = r;
+     this.color = color;
+     this.draw = function(ctx){
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.r, 0, Math.PI*2);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        ctx.closePath();
+    
+     }
+    }
+    function cirColli(con1,con2){
+    var dx = con1.x - con2.x;
+    var dy = con1.y - con2.y;
+    var distance = Math.sqrt(dx * dx + dy * dy);
+    return distance < con1.r + con2.r;
+    }
+    
+    </script>
+    
+    </head>
+    <body>
+    
+     <canvas id="canv" style="background-color: #000000;"></canvas>
+    
+    <script>
+    var playerFactory = null;
+    var enemyFactory = null;
+    var enemies = null;
+    var players = null;
+    var player1 = null;
+    var player1Dead = 0;
+    var end_time = 0;
+    var start_time = 0;
+    var last = -1;
+    
+    
+    var w = false;
+    var a = false;
+    var s = false;
+    var d = false;
+    
+    var canv = document.getElementById("canv");
+    var ctx = canv.getContext("2d");
+    var canvHeight = window.innerHeight - 20;
+    var canvWidth = window.innerWidth - 20;
+    canv.height = canvHeight;
+     canv.width = canvWidth;
+    
+    var factor = 0.005295593724670452*Math.sqrt(canvHeight*canvWidth );
+    var player_size = factor*5;
+    var eme_sp = factor*2;
+    var eme_size = factor*3;
+    var eme_etd = factor*7;
+    var hard = factor;
+    
+    function repaintEnemy(a1,a2,s) {
+    if(cirColli(a1,player1)){
+      enemies = {};
+      enemyFactory.graphics = enemies;
+      player1Dead+=1;
+      alert("Tried "+player1Dead.toString()+" times, "+Math.floor((end_time-start_time)/1000).toString()+" seconds.");
+      start_time = new Date();
+      player1.w = false;
+      player1.a = false;
+      player1.s = false;
+      player1.d = false;
+      mobile_end();
+      return;
+    }
+    a1.track(a1);
+    a1.draw(ctx);
+    }
+    
+    function initFactory(){
+    
+      var vpos = function(){
+        var vh = Math.random()>0.5?true:false;
+        var ce = Math.random()>0.5?true:false;
+        if(vh){
+          if(ce){
+            return [0, canvHeight*Math.random()];
+          }else{
+            return [canvWidth
+              , canvHeight*Math.random()];  
+          }
+        }else{
+          if(ce){
+            return [canvWidth*Math.random(),0 ];
+          }else{
+            return [canvWidth*Math.random()
+              ,canvHeight];
+          }
+        }
+       };
+       
+      var vsize = function(){
+        return eme_size+eme_etd*Math.random();
+      };
+      var vspeed = function(){return hard;};
+      var vinit = new Initialize({pos:vpos,size:vsize,speed:vspeed,id:0});
+      
+      enemies = {};
+      
+      var vlim = function(x,y){
+        if(x<0 || x>canvWidth || y<0 || y>canvHeight)
+          return true;
+        return false;
+      };
+      
+      var vdestroy = function(g){
+        delete enemies[g.id];
+      };
+      
+      enemyFactory = new GraphicsFactory
+        ({graphics:enemies,init:vinit
+        ,lim:vlim,destroy:vdestroy});
+      
+      enemyFactory.track = function(x,y){
+        var vx = player1.x-x;
+        var vy = player1.y-y;
+        var r = Math.sqrt(vx * vx + vy * vy);
+        vx = vx/r;
+        vy = vy/r;
+        return function(g){
+            if (enemyFactory.lim(g.x,g.y)){
+              enemyFactory.destroy(g);
+              return;
+            }
+            var speed = enemyFactory.init.speed();
+            g.x+=parseInt(speed*vx);
+            g.y+=parseInt(speed*vy);
+          };
+      };
+      
+      enemyFactory.createGraphic = function(){
+        var init = enemyFactory.init;
+        var pos = init.pos();
+        var shp = init.shape();
+        var graphic = new shp(pos[0],pos[1],init.size(),init.color());
+        graphic.track = enemyFactory.track(pos[0],pos[1]);
+        graphic.id = init.id++;
+        enemyFactory.graphics[graphic.id] = graphic;
+        return graphic;
+      };
+      
+      vpos = function(){return [canvWidth/2,canvHeight/2];};
+      vspeed = function(){return 50;};
+      vsize = function(){return player_size;};
+      var vcolor = function(){return "#0095DD";};
+      vinit = new Initialize
+        ({pos:vpos,size:vsize
+        ,color:vcolor,speed:vspeed,id:0});
+      players = {};
+      vdestroy = function(g){
+        delete players.delete[g.id];
+      };
+      vlim = function(g){
+        var x = g.x;
+        var y = g.y;
+        if(x<0){
+          g.x=0;
+          return true;
+        }if(x>canvWidth){
+          g.x=canvWidth;
+          return true;    
+        }if(y<0){
+          g.y=0;
+          return true;
+        }if(y>canvHeight){
+          g.y=canvHeight;
+          return true;
+        }return false;
+      };
+      playerFactory= new GraphicsFactory
+        ({graphics:players,init:vinit
+        ,lim:vlim,destroy:vdestroy});
+      playerFactory.track = function(){
+        return function(g,direction){
+            if (playerFactory.lim(g)){
+              
+              return;
+            }
+            var speed = playerFactory.init.speed();
+            if(direction =="w"){
+                g.y-=speed;
+            } else if(direction =="a"){
+                g.x-=speed;
+            } else if(direction =="s"){
+                g.y+=speed;
+            } else if(direction =="d"){
+                g.x+=speed;
+            }else alert("wrong key");
+          };
+      };
+      
+      player1 = playerFactory.createGraphic
+        ({k:"player1"});
+    
+    }
+    
+    function resize(){
+        canvHeight = window.innerHeight - 20;
+        canvWidth = window.innerWidth - 20;
+        canv.height =  canvHeight;
+        canv.width = canvWidth;
+        hard /= factor;
+        factor = 0.005295593724670452*Math.sqrt(canvHeight*canvWidth );
+        hard *= factor;
+        player_size = factor*5;
+        eme_sp = factor*2;
+        eme_size = factor*3;
+        eme_etd = factor*7;
+        player1.r = player_size;
+    }
+    </script>
+    <script>
+    function draw(){
+        
+        end_time = new Date();
+        if(Math.random()<hard*0.008){enemyFactory.createGraphic({});}
+        if(player1.a) player1.x -=hard*2;
+        if(player1.w) player1.y -=hard*2;
+        if(player1.s) player1.y +=hard*2;
+        if(player1.d) player1.x +=hard*2;
+        if(player1.x >= canvWidth) player1.x = canvWidth;
+        if(player1.x <= 0) player1.x = 0;
+        if(player1.y >= canvHeight) player1.y = canvHeight;
+        if(player1.y <= 0) player1.y = 0;
+        ctx.clearRect(0, 0, canv.width, canv.height);
+    
+        player1.draw(ctx);
+    
+        var item;
+        for (item in enemies){
+            repaintEnemy(enemies[item]);
+        }
+    
+    }
+    
+    function keyin(e){
+        e = e || window.event;
+        var ek = e.key;
+    
+        if(ek=="ArrowLeft" ||ek=="Left" || ek=="a" || ek=="A"){
+            player1.a = true;
+        }else if(ek=="ArrowUp" || ek=="Up" || ek=="w" || ek=="W"){
+            player1.w= true;
+        }else if(ek=="ArrowRight" || ek=="Right" || ek=="d" || ek=="D"){
+            player1.d=true;
+        }else if(ek=="ArrowDown" || ek=="Down" || ek=="s" || ek=="S"){
+            player1.s= true;
+        }else if( ek=="G" || ek=="g")hard+=1;
+        else if ( ek=="F" || ek=="f")hard-=1;
+    }
+    
+    function keyrea(e){
+        e = e || window.event;
+        var ek = e.key;
+        if(ek=="ArrowLeft" ||ek=="Left" || ek=="a" || ek=="A"){
+            player1.a = false;
+        }else if(ek=="ArrowUp" || ek=="Up" || ek=="w" || ek=="W"){
+            player1.w= false;
+        }else if(ek=="ArrowRight" || ek=="Right" || ek=="d" || ek=="D"){
+            player1.d=false;
+        }else if(ek=="ArrowDown" || ek=="Down" || ek=="s" || ek=="S"){
+            player1.s= false;
+        }
+    }
+    
+    function touch_closeing(evt){
+        evt = player1.last_touch_event || evt ||  window.event;
+        
+        if(!evt) return;
+        var x =  evt.targetTouches[0].pageX;
+        var y =  evt.targetTouches[0].pageY;
+        var dx = x - player1.x;
+        var dy = y - player1.y;
+        var mul = hard*8;
+        var dr = Math.sqrt(dx*dx + dy*dy);
+        var mx = dx/dr*mul;
+        var my = dy/dr*mul;
+        
+        if(mul>dr) return;
+        player1.x += mx;
+        player1.y += my;
+        //player1.last_x = evt.targetTouches[0].pageX;
+        //player1.last_y = evt.targetTouches[0].pageY; 
+    }
+    
+    function updateTouchEvent(evt){
+        player1.last_touch_event = evt;
+    }
+    
+    function do_nothing(){}
+    function mobile_move(evt){
+        evt = evt || window.event
+        evt.preventDefault();
+        player1.last_touch_event = evt;
+        //touch_closeing();
+    }
+    function mobile_end(evt){
+        clearInterval( player1.touchInterval);
+        player1.touchInterval = null;
+        //delete player1.touch_start;
+    }
+    function mobile_start(evt){
+        evt = evt|| window.event
+        if(canv.onmousemove!==null) canv.onmousemove = null;
+        player1.last_touch_event = evt;
+        if(evt.targetTouches.length === 1){
+            if(player1.touchInterval===null){
+                player1.touchInterval = setInterval(touch_closeing,50);
+                touch_closeing();
+            }
+        }else if(evt.targetTouches.length === 2){
+            hard+=1;
+        }else if(evt.targetTouches.length === 3){
+            hard-=1;
+        } 
+    }
+    function onDblclick(){
+        hard-=1;
+    }
+    
+    function mousee(){
+    x = player1.x;
+    y = player1.y;
+    player1.x = window.event.clientX;
+    player1.y = window.event.clientY;
+    }
+    function choose_event(evt){
+    evt = evt.type;
+    canv.onmousemove = choose_event;
+    canv.ontouchmove = choose_event;
+    canv.ontouchstart = choose_event;
+    canv.ontouchend = choose_event;
+    if(evt=="mousemove"){
+    canv.onmousemove = mousee;
+    mousee(evt);
+    }else if(evt=="touchstart"){
+      canv.ontouchmove = mobile_move;
+      canv.ontouchstart = mobile_start;
+      canv.ontouchend = mobile_end;
+      mobile_start(evt);
+    }else if(evt== "touchmove"){
+      canv.ontouchmove = mobile_move;
+      canv.ontouchstart = mobile_start;
+      canv.ontouchend = mobile_end;
+      mobile_move(evt);
+    }else if(evt=="touchend"){
+      canv.ontouchmove = mobile_move;
+      canv.ontouchstart = mobile_start;
+      canv.ontouchend = mobile_end;
+      mobile_end(evt);
+    }
+    }
+    /*
+    canv.onmousemove = choose_event;
+    canv.ontouchmove = choose_event;
+    canv.ontouchstart = choose_event;
+    canv.ontouchend = choose_event;
+    */
+    canv.onmousemove = mousee;
+    canv.ontouchmove = mobile_move;
+    canv.ontouchstart = mobile_start;
+    canv.ontouchend = mobile_end;
+    canv.ondblclick = onDblclick;
+    document.onkeydown = keyin;
+    document.onkeyup = keyrea;
+    window.onresize = resize;
+    
+    initFactory();
+    
+    function drawFrame() {
+        window.requestAnimationFrame(drawFrame);
+        draw();
+    }
+    start_time = new Date();
+    window.requestAnimationFrame(drawFrame);
+    //loop = setInterval(draw,50);
+    
+    </script>
+    
+    </body>
+    <style>body{background-color: #330055;}</style>
+    </html>
+    
