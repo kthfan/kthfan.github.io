@@ -7,8 +7,6 @@ importScripts('sampling.js');
 
 let globalObj = {};
 
-tf.setBackend('webgl');
-
 onmessage = function(evt) {
 	// tf.engine().startScope();
 	
@@ -38,16 +36,17 @@ onmessage = function(evt) {
                          status: 0,
                          currentStep: i});
         }
-        let gen_img = sampleEulerAncestral(globalObj.unet, 
+        let genImg = sampleEulerAncestral(globalObj.unet, 
                                            tf.randomNormal([1, evt.data.height, evt.data.width, 1]),
                                            callback,
                                            evt.data.steps);
-		gen_img = gen_img.squeeze(0).squeeze(-1);
-		gen_img = gen_img.mul(0.1850).add(0.0438);
+		genImg = genImg.squeeze(0).squeeze(-1);
+		genImg = genImg.mul(0.1850).add(0.0438);
+        genImg = tf.clipByValue(genImg, 0, 1);
         postMessage({action: evt.data.action, 
-                     message: `The image with ${gen_img.shape[0]}X${gen_img.shape[1]} pixels is generated.`, 
+                     message: `The image with ${genImg.shape[0]}X${genImg.shape[1]} pixels is generated.`, 
                      status: 0,
-                     image: gen_img.arraySync()});
+                     image: genImg.arraySync()});
     }
 
 	// tf.engine().endScope();

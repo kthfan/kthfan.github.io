@@ -17,6 +17,12 @@ let stepsSlideDisplayElem = document.getElementById('steps-slide-display');
 let heightSlideDisplayElem = document.getElementById('height-slide-display');
 let widthSlideDisplayElem = document.getElementById('width-slide-display');
 
+
+function initializeDOM(){
+    generateBnElem.disabled = true;
+}
+
+
 function advancedImageShow(image){
     image = tf.tensor(image);
     let [height, width] = image.shape;
@@ -54,6 +60,8 @@ generateBnElem.addEventListener('click', evt => {
 });
 
 reloadModelBnElem.addEventListener('click', evt=>{
+    globalObj.unetPrepared = false;
+    generateBnElem.disabled = true;
     globalObj.worker.postMessage({
         action: 'load model',
         path: 'text-gen-min.json'
@@ -61,19 +69,24 @@ reloadModelBnElem.addEventListener('click', evt=>{
 });
 
 radioCpuElem.addEventListener('change', () => {
-    globalObj.worker.postMessage({
-        action: 'set backend',
-        backend: 'cpu'
-    });
+    if (radioCpuElem.checked){
+        globalObj.worker.postMessage({
+            action: 'set backend',
+            backend: 'cpu'
+        });
+    }
 });
 radioGpuElem.addEventListener('change', () => {
-    globalObj.worker.postMessage({
-        action: 'set backend',
-        backend: 'webgl'
-    });
+    if (radioCpuElem.checked){
+        globalObj.worker.postMessage({
+            action: 'set backend',
+            backend: 'webgl'
+        });
+    } 
 });
 
-stepsSlideElem.addEventListener('change', () => stepsSlideDisplayElem.value = stepsSlideElem.value);
-heightSlideElem.addEventListener('change', () => heightSlideDisplayElem.value = heightSlideElem.value);
-widthSlideElem.addEventListener('change', () => widthSlideDisplayElem.value = widthSlideElem.value);
+stepsSlideElem.addEventListener('input', () => stepsSlideDisplayElem.value = stepsSlideElem.value);
+heightSlideElem.addEventListener('input', () => heightSlideDisplayElem.value = heightSlideElem.value);
+widthSlideElem.addEventListener('input', () => widthSlideDisplayElem.value = widthSlideElem.value);
 
+initializeDOM();

@@ -16,8 +16,8 @@
                     <span>Progress: </span> <progress id="progressbar" value="0" min="0" max="20"> 0% </progress>
                 </div>
                 <div class="tool-container">
-                    <span>Steps: </span> <input id="steps-slide" type="range", min="0", max="100", value="10"/> 
-                    <input id="steps-slide-display" type="text" size="1" value="10" disabled/>
+                    <span>Steps: </span> <input id="steps-slide" type="range", min="1", max="30", value="6"/> 
+                    <input id="steps-slide-display" type="text" size="1" value="6" disabled/>
                 </div>
                 <div class="tool-container">
                     <span>Height: </span> <input id="height-slide" type="range", min="8", max="80", step="8", value="48"/>
@@ -28,11 +28,12 @@
                     <input id="width-slide-display" type="text" size="1" value="48" disabled/>
                 </div>
                 <div class="tool-container">
-                    <input type="radio" id="radio-cpu" name="device" value="cpu"> cpu
-                    <input type="radio" id="radio-gpu" name="device" value="webgl" checked> gpu
+                    <input type="radio" id="radio-cpu" name="device" value="cpu" checked> cpu
+                    <input type="radio" id="radio-gpu" name="device" value="webgl"> gpu
                 </div>
                 <div class="tool-container">
-                    <button id="generate-bn">Generate</button> &nbsp; <button id="reload-model-bn">Reload Model</button>
+                    <button id="generate-bn" disabled >Generate</button> &nbsp; 
+                    <button id="reload-model-bn">Reload Model</button>
                 </div>
             </div>
         </div>

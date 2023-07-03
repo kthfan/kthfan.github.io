@@ -18,7 +18,7 @@ async function main(){
 	.then(() => load_js("sampling.js"))
 	.then(() => {
 		// tf.setBackend('wasm');
-		// tf.setBackend('cpu');
+		tf.setBackend('cpu');
 		// tf.setBackend('webgl');
 
 		
@@ -88,6 +88,11 @@ async function main(){
 			if(evt.data.action === "load model"){
 				if (evt.data.status === 0){
 					globalObj.unetPrepared = true;
+					generateBnElem.disabled = false;
+					globalObj.worker.postMessage({
+						action: 'set backend',
+						backend: radioCpuElem.checked ? 'cpu' : 'webgl'
+					});
 				} else alert(evt.data.message);
 			}else if (evt.data.action === "generate image"){
 				globalObj.isGenerating = false;
