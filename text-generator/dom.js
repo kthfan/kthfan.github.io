@@ -13,9 +13,9 @@ let radioGpuElem = document.getElementById('radio-gpu');
 let generateBnElem = document.getElementById('generate-bn');
 let reloadModelBnElem = document.getElementById('reload-model-bn');
 
-let stepsSlideDisplayElem = document.getElementById('steps-slide-display');
-let heightSlideDisplayElem = document.getElementById('height-slide-display');
-let widthSlideDisplayElem = document.getElementById('width-slide-display');
+let stepsNumberElem = document.getElementById('steps-slide-display');
+let heightNumberElem = document.getElementById('height-slide-display');
+let widthNumberElem = document.getElementById('width-slide-display');
 
 
 function initializeDOM(){
@@ -85,8 +85,12 @@ radioGpuElem.addEventListener('change', () => {
     } 
 });
 
-stepsSlideElem.addEventListener('input', () => stepsSlideDisplayElem.value = stepsSlideElem.value);
-heightSlideElem.addEventListener('input', () => heightSlideDisplayElem.value = heightSlideElem.value);
-widthSlideElem.addEventListener('input', () => widthSlideDisplayElem.value = widthSlideElem.value);
+stepsNumberElem.addEventListener('input', () => stepsSlideElem.value = stepsNumberElem.value);
+heightNumberElem.addEventListener('input', () => heightSlideElem.value = heightNumberElem.value);
+widthNumberElem.addEventListener('input', () => widthSlideElem.value = widthNumberElem.value);
+
+stepsSlideElem.addEventListener('input', () => stepsNumberElem.value = stepsSlideElem.value);
+heightSlideElem.addEventListener('input', () => heightNumberElem.value = heightSlideElem.value);
+widthSlideElem.addEventListener('input', () => widthNumberElem.value = widthSlideElem.value);
 
 initializeDOM();

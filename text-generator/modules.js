@@ -63,23 +63,61 @@ var Pooling = config => tf.layers.averagePooling2d({...{poolSize: [2, 2], stride
 var Upsampling = config => tf.layers.upSampling2d({...{size: [2, 2], interpolation: 'nearest'}, ...config});
 var Normalization = config => new SmartGroupNorm(config);
 
-function customInitializeWeights(obj, layers){
-    for(let layer of layers){
-        if('customInitializeWeights' in layer)
-            layer.customInitializeWeights();
-        if('weights' in layer){
-            for(let weight of layer.weights){
-                obj._addedWeightNames.push(weight.name);
-                if (weight.trainable)
-                    obj._trainableWeights.push(weight);
-                else
-                    obj._nonTrainableWeights.push(weight);
+class Layer extends tf.layers.Layer {
+    constructor(config){
+        super(config);
+        this._attrsSetOrdered = [];
+        let proxy =  new Proxy(this, {
+            set: function (target, key, value) {
+                target[key] = value;
+                if(value instanceof tf.layers.Layer || value instanceof Array){
+                    target._attrsSetOrdered.push(value);
+                }
+                return true;
+            }
+        }); 
+        proxy._layers = [];
+        this._attrsSetOrdered.pop();
+        return proxy;
+    }
+
+    _checkAndSetLayer(value){
+        if (value instanceof tf.layers.Layer){
+            this._layers.push(value);
+        } else if (value instanceof Array){
+            for(let elem of value){
+                this._checkAndSetLayer(elem);
             }
         }
     }
+
+    _initializeWeights(){
+        for(let layer of this._layers){
+            if('weights' in layer){
+                for(let weight of layer.weights){
+                    this._addedWeightNames.push(weight.name);
+                    if (weight.trainable)
+                        this._trainableWeights.push(weight);
+                    else
+                        this._nonTrainableWeights.push(weight);
+                }
+            }
+        }
+    }
+
+    apply(inputs, kwargs){
+        let built = this.built;
+        let result = super.apply(inputs, kwargs);
+        if(!built){
+            for(let attr of this._attrsSetOrdered)
+                this._checkAndSetLayer(attr);
+            this._initializeWeights();
+        }
+        return result;
+    }
 }
 
-function timestep_embedding(timesteps, dim, max_period=10000){
+function timestepEmbedding(timesteps, dim, max_period=10000){
     let half = dim / 2;
     let freqs = tf.exp(tf.range(0, half).div(half).mul(-Math.log(max_period)));
     let args = timesteps.expandDims(1).mul(freqs.expandDims(0));
@@ -89,7 +127,7 @@ function timestep_embedding(timesteps, dim, max_period=10000){
     return embedding;
 }
 
-class Sequential extends tf.layers.Layer{
+class Sequential extends Layer{
     constructor(...layers){
         super({});
         this.layers = layers;
@@ -102,15 +140,11 @@ class Sequential extends tf.layers.Layer{
         return x;
     }
 
-    customInitializeWeights(){
-        customInitializeWeights(this, this.layers);
-    }
-
     static get className() {
         return 'Sequential';
     }
 }
-class BasicResBlock extends tf.layers.Layer{
+class BasicResBlock extends Layer{
     constructor(config){
         super(config);
         // this.in_channels = config.in_channels;
@@ -164,15 +198,6 @@ class BasicResBlock extends tf.layers.Layer{
         return x0.add(x);
     }
 
-    customInitializeWeights(){
-        customInitializeWeights(this, [
-            this.shortcut_layers,
-            this.in_residual_layers,
-            this.out_residual_layers,
-            this.emb_layers
-        ]);
-    }
-
     static get className() {
         return 'BasicResBlock';
     }
@@ -194,7 +219,7 @@ function qkv_attention(qkv, n_heads=8){
     return a;
 }
 
-class AttentionBlock extends tf.layers.Layer{
+class AttentionBlock extends Layer{
     constructor(config){
         super(config);
         this.num_heads = config.num_heads ?? 8;
@@ -214,20 +239,12 @@ class AttentionBlock extends tf.layers.Layer{
         return x.add(h);
     }
 
-    customInitializeWeights(){
-        customInitializeWeights(this, [
-            this.norm,
-            this.qkv,
-            this.proj_out
-        ]);
-    }
-
     static get className() {
         return 'AttentionBlock';
     }
 }
 
-class UNetBlock extends tf.layers.Layer{
+class UNetBlock extends Layer{
     constructor(config){
         super(config);
         this.resblock = new ResBlock(config);
@@ -241,19 +258,12 @@ class UNetBlock extends tf.layers.Layer{
         return this.attblock.apply(this.resblock.apply([x, t]));
     }
 
-    customInitializeWeights(){
-        customInitializeWeights(this, [
-            this.resblock,
-            this.attblock,
-        ]);
-    }
-
     static get className() {
         return 'UNetBlock';
     }
 }
 
-class UNet extends tf.layers.Layer {
+class UNet extends Layer {
     constructor(config){
         super(config);
         this.base_channels = config.base_channels;
@@ -320,7 +330,7 @@ class UNet extends tf.layers.Layer {
 
     call(inputs){
         let [x, t] = inputs;
-        let t_emb = timestep_embedding(t, this.base_channels);
+        let t_emb = timestepEmbedding(t, this.base_channels);
         t_emb = this.emb_layers.apply(t_emb);
         let latents = [];
         
@@ -346,17 +356,6 @@ class UNet extends tf.layers.Layer {
         x = this.out_layers.apply(x);
         
         return x
-    }
-
-    customInitializeWeights(){
-        customInitializeWeights(this, [
-            this.emb_layers,
-            this.in_layers,
-            ...this.in_blocks,
-            ...this.mid_blocks,
-            ...this.out_blocks,
-            this.out_layers,
-        ]);
     }
 
     static get className() {

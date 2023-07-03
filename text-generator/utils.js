@@ -29,7 +29,7 @@ function loadUNet(path, config){
 	let x = tf.randomNormal([1, 48, 48, 1]);
 	let t = tf.tensor([999]);
 	let eps = unet.apply([x, t]);
-	unet.customInitializeWeights();
+	// unet.customInitializeWeights();
 	return loadWeights(unet, path);
 }
 
@@ -45,5 +45,6 @@ function imshow(canvas, tensor) {
 
     canvas.width = tensor.shape[0];
     canvas.height = tensor.shape[1];
-    tf.browser.toPixels(tensor, canvas);
+	tf.browser.draw(tensor, canvas);
+    // tf.browser.toPixels(tensor, canvas);
 }
