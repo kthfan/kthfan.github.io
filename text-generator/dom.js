@@ -38,6 +38,7 @@ function advancedImageShow(image){
     image = tf.image.resizeBilinear(image, [height, width]);
     image = tf.squeeze(image, 2);
     imshow(canvasElem, image);
+    image.dispose();
 }
 
 generateBnElem.addEventListener('click', evt => {
@@ -69,7 +70,6 @@ reloadModelBnElem.addEventListener('click', evt=>{
 });
 
 radioCpuElem.addEventListener('change', () => {
-    console.log("cpu");
     if (radioCpuElem.checked){
         globalObj.worker.postMessage({
             action: 'set backend',
@@ -78,7 +78,6 @@ radioCpuElem.addEventListener('change', () => {
     }
 });
 radioGpuElem.addEventListener('change', () => {
-    console.log("gpu", );
     if (radioGpuElem.checked){
         globalObj.worker.postMessage({
             action: 'set backend',

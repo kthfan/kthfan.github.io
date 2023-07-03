@@ -36,17 +36,22 @@ onmessage = function(evt) {
                          status: 0,
                          currentStep: i});
         }
-        let genImg = sampleEulerAncestral(globalObj.unet, 
-                                           tf.randomNormal([1, evt.data.height, evt.data.width, 1]),
-                                           callback,
-                                           evt.data.steps);
-		genImg = genImg.squeeze(0).squeeze(-1);
-		genImg = genImg.mul(0.1850).add(0.0438);
-        genImg = tf.clipByValue(genImg, 0, 1);
+        let genImg = tf.tidy(() => {
+            let genImg = sampleEulerAncestral(globalObj.unet, 
+                            tf.randomNormal([1, evt.data.height, evt.data.width, 1]),
+                            callback,
+                            evt.data.steps);
+            genImg = genImg.squeeze(0).squeeze(-1);
+            genImg = genImg.mul(0.1850).add(0.0438);
+            genImg = tf.clipByValue(genImg, 0, 1);
+            return genImg;
+        });
+        
         postMessage({action: evt.data.action, 
                      message: `The image with ${genImg.shape[0]}X${genImg.shape[1]} pixels is generated.`, 
                      status: 0,
                      image: genImg.arraySync()});
+        genImg.dispose();
     }
 
 	// tf.engine().endScope();
