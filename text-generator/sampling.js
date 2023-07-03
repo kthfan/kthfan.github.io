@@ -32,20 +32,23 @@ function sampleEulerAncestral(model, x, callback, steps=20, num_timesteps=1000, 
 	t_list = t_list.arraySync();
 
 	x = x.mul(sigmas[0]);
-	for(i=0; i < steps; i++){
+	for(let i=0; i < steps; i++){
 		callback(i);
-		let t = t_list[i];
-		let sigma = sigmas[i];
-		let sigma_next = sigmas[i + 1];
-		
-		let denoised = ddpmDenoise(model, x, t, sigma);
-		let [sigma_down, sigma_up] = getAncestralStep(sigma, sigma_next, eta);
-		
-		let d =  tf.sub(x, denoised).div(sigma);
-		let dt = sigma_down - sigma;
-		x = x.add(d.mul(dt));
-		if(sigma_next > 0)
-			x = x.add(tf.randomNormal(x.shape).mul(sigma_up));
+		x = tf.tidy(() => {
+			let t = t_list[i];
+			let sigma = sigmas[i];
+			let sigma_next = sigmas[i + 1];
+			
+			let denoised = ddpmDenoise(model, x, t, sigma);
+			let [sigma_down, sigma_up] = getAncestralStep(sigma, sigma_next, eta);
+			
+			let d =  tf.sub(x, denoised).div(sigma);
+			let dt = sigma_down - sigma;
+			x = x.add(d.mul(dt));
+			if(sigma_next > 0)
+				x = x.add(tf.randomNormal(x.shape).mul(sigma_up));
+			return x;
+		});
 	}
 	return x
 }

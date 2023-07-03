@@ -69,6 +69,7 @@ reloadModelBnElem.addEventListener('click', evt=>{
 });
 
 radioCpuElem.addEventListener('change', () => {
+    console.log("cpu");
     if (radioCpuElem.checked){
         globalObj.worker.postMessage({
             action: 'set backend',
@@ -77,7 +78,8 @@ radioCpuElem.addEventListener('change', () => {
     }
 });
 radioGpuElem.addEventListener('change', () => {
-    if (radioCpuElem.checked){
+    console.log("gpu", );
+    if (radioGpuElem.checked){
         globalObj.worker.postMessage({
             action: 'set backend',
             backend: 'webgl'
