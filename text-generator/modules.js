@@ -64,6 +64,7 @@ var Upsampling = config => tf.layers.upSampling2d({...{size: [2, 2], interpolati
 var Normalization = config => new SmartGroupNorm(config);
 
 class Layer extends tf.layers.Layer {
+    /** Solving the problem that weights of custom layer won't be initialized. */
     constructor(config){
         super(config);
         this._attrsSetOrdered = [];
@@ -147,7 +148,6 @@ class Sequential extends Layer{
 class BasicResBlock extends Layer{
     constructor(config){
         super(config);
-        // this.in_channels = config.in_channels;
         this.out_channels = config.out_channels;
         this.emb_channels = config.emb_channels;
         this.is_up = config.is_up ?? false;
@@ -173,7 +173,6 @@ class BasicResBlock extends Layer{
         this.out_residual_layers = new Sequential(
             Normalization(),
             Activation(),
-            // Dropout2d(self.dropout) if this.dropout > 0 else Identity(),
             Conv2d({filters: this.out_channels, kernelSize: 3, kernelInitializer: 'zeros'}),
         )
         
@@ -363,5 +362,4 @@ class UNet extends Layer {
     }
 }
         
-
 
