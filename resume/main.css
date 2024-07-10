@@ -3,6 +3,7 @@ body{
     /* font-family: SimSun; */
     line-height: 1.5;
     font-size: 12px;
+    text-align: justify;
 }
 
 a.black-href:link {
@@ -53,6 +54,7 @@ a.white-href:hover {
     width: 800px;
     font-size: 30px;
     margin: auto;
+    line-height: 60px;
     box-shadow:3px 3px 5px 6px rgba(0, 0, 0, 0.2);
 }
 
@@ -71,6 +73,14 @@ a.white-href:hover {
 }
 .lang-bn:active{
     background-color: rgb(149, 255, 0);
+    cursor: pointer;
+}
+
+#qr-code{
+    /* display: block; */
+    /* align-self: flex-end; */
+    margin-right: 5px;
+    margin-left: auto;
     cursor: pointer;
 }
 

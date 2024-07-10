@@ -5,7 +5,9 @@ var iFrame = document.getElementById("iframe");
 var chineseBn = document.getElementById("chinese-bn");
 var englishBn = document.getElementById("english-bn");
 var downloadPdfBn = document.getElementById("download-pdf-bn");
+var qrCodeImg = document.getElementById("qr-code");
 var langMode = "zh-tw";
+var qrCodeEnlarged = false;
 
 
 function refreshCN(){
@@ -42,6 +44,42 @@ englishBn.addEventListener("click", () => {
     iFrame.src = "content-en-us.html";
     refreshEN();
 });
+
+function togggleQRCode(){
+    if(qrCodeEnlarged){
+        qrCodeImg.width = 50;
+        qrCodeEnlarged = false;
+    } else{
+        qrCodeImg.width = 300;
+        qrCodeEnlarged = true;
+    }
+}
+
+qrCodeImg.addEventListener("click", () => {
+    if(qrCodeEnlarged){
+        qrCodeImg.width = 50;
+        qrCodeEnlarged = false;
+    } else{
+        qrCodeImg.width = 300;
+        qrCodeEnlarged = true;
+    }
+});
+qrCodeImg.addEventListener("mouseover", () => {
+    if(qrCodeEnlarged){
+        qrCodeImg.width = 200;
+    } else{
+        qrCodeImg.width = 100;
+    }
+});
+qrCodeImg.addEventListener("mouseleave", () => {
+    if(qrCodeEnlarged){
+        qrCodeImg.width = 300;
+    } else{
+        qrCodeImg.width = 50;
+    }
+});
+
+
 
 iFrame.src = "content-zh-tw.html";
 refreshCN();
