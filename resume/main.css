@@ -6,6 +6,10 @@ body{
     text-align: justify;
 }
 
+td{
+    vertical-align: top;
+}
+
 a.black-href:link {
     color: black;
     background-color: transparent;
