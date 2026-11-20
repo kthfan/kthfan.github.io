@@ -1,0 +1,1352 @@
+diff --git a/scripts/reach_volume/binarize_reach_volume.py b/scripts/reach_volume/binarize_reach_volume.py
+new file mode 100644
+index 0000000..b85b5ee
+--- /dev/null
++++ b/scripts/reach_volume/binarize_reach_volume.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++"""Binarize a reach-volume npz: sphere fit -> inner area -> valid / invalid.
++
++The reachable set (level > 0) looks like a half sphere with holes. Three steps:
++
++1. **Envelope surface.** Voxels with level > 0 form the envelope. Background
++   connected to the grid border is *exterior*; background enclosed by the
++   envelope is a hole and does not count as outside. Every face between an
++   envelope voxel and an exterior voxel yields one surface sample at the face
++   midpoint (unbiased by half a step, unlike the voxel centres). Faces on the
++   grid border yield nothing, so the flat cut where the grid ends adds no samples.
++2. **Sphere.** A robust sphere fit (algebraic start, then trimmed geometric
++   least squares) to those samples. The concave surface around any unreachable
++   core, and notches in the shell, are rejected as outliers.
++3. **Split.** ``inner`` = grid points within the sphere plus *margin* (default half
++   a step, so a voxel cell that touches the sphere counts as inside; everything
++   else is outer). ``valid`` = inner points whose level equals the number of phases,
++   i.e. every action passed. ``invalid`` = inner and not valid.
++
++Output ``label``: 0 outer, 1 inner-invalid, 2 inner-valid; ``valid`` and ``inner``
++are the boolean masks. ``levels`` is kept as is.
++
++    python scripts/reach_volume/binarize_reach_volume.py --src <npz>
++"""
++from __future__ import annotations
++
++import argparse
++
++import numpy as np
++from scipy import ndimage, optimize
++
++OUTER, INVALID, VALID = 0, 1, 2
++
++
++def exterior(envelope: np.ndarray) -> np.ndarray:
++    """Background voxels connected to a face of the grid (holes are not)."""
++    lab, n = ndimage.label(~envelope)
++    border = np.zeros(envelope.shape, dtype=bool)
++    for ax in range(3):
++        border[(slice(None),) * ax + (0,)] = True
++        border[(slice(None),) * ax + (-1,)] = True
++    keep = np.unique(lab[border & ~envelope])
++    return np.isin(lab, keep[keep > 0])
++
++
++def surface_samples(envelope: np.ndarray, axes) -> np.ndarray:
++    """Midpoints of every face between an envelope voxel and an exterior voxel."""
++    ext = exterior(envelope)
++    pts = []
++    for ax in range(3):
++        a = [slice(None)] * 3
++        b = [slice(None)] * 3
++        a[ax], b[ax] = slice(None, -1), slice(1, None)
++        a, b = tuple(a), tuple(b)
++        # each pair is (lower voxel, upper voxel) along this axis
++        for faces in (envelope[a] & ext[b], ext[a] & envelope[b]):
++            lower = np.argwhere(faces)
++            upper = lower.copy()
++            upper[:, ax] += 1
++            pts.append(np.stack([(axes[k][lower[:, k]] + axes[k][upper[:, k]]) / 2
++                                 for k in range(3)], 1))
++    return np.concatenate(pts) if pts else np.empty((0, 3))
++
++
++def _algebraic(P):
++    A = np.c_[2 * P, np.ones(len(P))]
++    s = np.linalg.lstsq(A, (P ** 2).sum(1), rcond=None)[0]
++    c = s[:3]
++    return c, float(np.sqrt(max(s[3] + c @ c, 0.0)))
++
++
++def fit_sphere(P: np.ndarray, tol: float, iters: int = 20):
++    """Robust sphere fit. Returns (centre, radius, inlier mask)."""
++    if len(P) < 4:
++        raise ValueError("need at least 4 surface samples")
++    c, r = _algebraic(P)
++    keep = np.ones(len(P), dtype=bool)
++    for _ in range(iters):
++        res = np.linalg.norm(P - c, axis=1) - r
++        # inner-void and notch samples sit far from the shell: trim, never grow
++        new = np.abs(res) < max(tol, 2.5 * 1.4826 * np.median(np.abs(res[keep])))
++        if new.sum() < 4:
++            break
++        sol = optimize.least_squares(
++            lambda q: np.linalg.norm(P[new] - q[:3], axis=1) - q[3],
++            np.r_[c, r], loss="soft_l1", f_scale=tol)
++        c, r = sol.x[:3], float(sol.x[3])
++        if (new == keep).all():
++            break
++        keep = new
++    res = np.linalg.norm(P - c, axis=1) - r
++    return c, r, np.abs(res) < tol
++
++
++def binarize(d, tol: float | None = None, margin: float | None = None) -> dict:
++    """*d*: mapping with xs, ys, zs, levels, phases, preset (and optional extras)."""
++    xs, ys, zs = (np.asarray(d[k], dtype=float) for k in ("xs", "ys", "zs"))
++    levels = np.asarray(d["levels"])
++    full = len(d["phases"])
++    step = float(np.min([np.diff(xs).min(), np.diff(ys).min(), np.diff(zs).min()]))
++    tol = step if tol is None else tol
++    margin = step / 2 if margin is None else margin
++
++    pts = surface_samples(levels > 0, (xs, ys, zs))
++    centre, radius, inl = fit_sphere(pts, tol)
++
++    X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
++    dist = np.sqrt((X - centre[0]) ** 2 + (Y - centre[1]) ** 2 + (Z - centre[2]) ** 2)
++    inner = dist <= radius + margin
++    valid = inner & (levels == full)
++    label = np.full(levels.shape, OUTER, dtype=np.int8)
++    label[inner] = INVALID
++    label[valid] = VALID
++
++    out = {k: d[k] for k in ("xs", "ys", "zs", "levels", "phases", "preset", "frame") if k in d}
++    out.update(inner=inner, valid=valid, label=label,
++               sphere_centre=centre, sphere_radius=np.array(radius), sphere_margin=np.array(margin),
++               surface_samples=np.array(len(pts)), surface_inliers=np.array(int(inl.sum())))
++    return out
++
++
++def report(out) -> str:
++    lv, inner, valid = out["levels"], out["inner"], out["valid"]
++    reached_outside = int(((lv > 0) & ~inner).sum())
++    return (f"sphere centre {np.round(out['sphere_centre'], 4).tolist()} "
++            f"radius {float(out['sphere_radius']):.4f} + margin {float(out['sphere_margin']):.4f}  "
++            f"({int(out['surface_inliers'])}/{int(out['surface_samples'])} surface samples fit)\n"
++            f"  inner {int(inner.sum())}  valid {int(valid.sum())}  "
++            f"invalid {int((inner & ~valid).sum())}  outer {int((~inner).sum())}\n"
++            f"  reached voxels outside the sphere: {reached_outside}  "
++            f"(valid fraction of inner {valid.sum() / inner.sum():.3f})")
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--src", nargs="+", required=True, help="reach-volume npz files")
++    ap.add_argument("--tol", type=float, default=None, help="inlier distance, m (default: grid step)")
++    ap.add_argument("--margin", type=float, default=None, help="added to the radius, m (default: half the grid step)")
++    args = ap.parse_args()
++    for src in args.src:
++        dst = src[:-4] + "_binary.npz"
++        with np.load(src) as d:
++            out = binarize({k: d[k] for k in d.files}, args.tol, args.margin)
++        np.savez(dst, **out)
++        print("wrote", dst)
++        print(report(out))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/reach_volume/export_reach_volume_obj.py b/scripts/reach_volume/export_reach_volume_obj.py
+new file mode 100644
+index 0000000..946a2ea
+--- /dev/null
++++ b/scripts/reach_volume/export_reach_volume_obj.py
+@@ -0,0 +1,169 @@
++#!/usr/bin/env python3
++"""Export the valid / invalid areas of a binarized reach volume as Wavefront OBJ.
++
++OBJ: plain text, no dependency to write or read, opened by Blender, MeshLab,
++trimesh, CAD importers and ROS/Gazebo alike.
++
++Each area becomes one closed mesh made of the boundary faces of its voxels (a
++voxel is the grid cell centred on a point, one step wide), so the mesh is exactly
++the labelled region, with no smoothing. Triangles, outward-facing (CCW), vertices
++shared. Units are metres, axes are those of the npz (tray frame: x lateral, y up,
++z approach), origin at the robot base.
++
++Colours live in a sidecar ``<stem>.mtl`` next to the OBJs (valid green, invalid red,
++both ``d 0.5`` = 50 % opaque). Keep the .mtl beside the .obj files. Some viewers
++ignore ``d``; in Blender set the material's blend mode if it shows opaque.
++
++    python scripts/reach_volume/export_reach_volume_obj.py --src <stem>_binary.npz
++"""
++from __future__ import annotations
++
++import argparse
++import os
++
++import numpy as np
++from scipy import ndimage
++from scipy.spatial import ConvexHull
++
++#: Never-reached voxels this close (in cells) to the outer area are the fit's skin.
++SKIN_CELLS = 2
++#: Invalid pieces smaller than this (voxels) are specks.
++MIN_PIECE = 10
++
++
++def hull_mask(valid, xs, ys, zs) -> np.ndarray:
++    """Grid points whose whole voxel cell lies inside the convex hull of the valid area.
++
++    The hull is built from the corners of the valid voxels, i.e. from the same
++    cells the valid mesh is made of. A cell counts only if all 8 of its corners are
++    inside, so no exported face pokes out of the hull.
++    """
++    axes = [np.asarray(a, dtype=float) for a in (xs, ys, zs)]
++    half = np.array([float(np.diff(a).mean()) / 2.0 for a in axes])
++    X, Y, Z = np.meshgrid(*axes, indexing="ij")
++    centres = np.stack([X[valid], Y[valid], Z[valid]], 1)
++    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
++    corners = (centres[:, None, :] + signs * half).reshape(-1, 3)
++    eq = ConvexHull(corners).equations                  # n . p + offset <= 0 inside
++    pts = np.stack([X.ravel(), Y.ravel(), Z.ravel()], 1)
++    inside = np.ones(len(pts), dtype=bool)
++    for s in signs:
++        inside &= ((pts + s * half) @ eq[:, :3].T + eq[:, 3] <= 1e-9).all(1)
++    return inside.reshape(X.shape)
++
++
++def invalid_area(inner, valid, levels, xs, ys, zs, skin_cells=SKIN_CELLS, min_piece=MIN_PIECE):
++    """``inner & ~valid``, kept only inside the convex hull of the valid area.
++
++    Anything outside that hull is not part of the region the valid area spans,
++    so it is excluded. Also dropped: the unreached skin and specks.
++
++    The sphere is only an approximation of the reach envelope, so a one-to-two
++    cell layer just inside it is level 0 simply because the real surface is a
++    little smaller. Those voxels are not a finding, so they are dropped, together
++    with any separate piece under *min_piece* voxels. Reached-but-failed voxels
++    (level 1..N-1) are kept, as long as they are inside the hull.
++    """
++    inner = np.asarray(inner, dtype=bool)
++    valid = np.asarray(valid, dtype=bool)
++    inv = inner & ~valid & hull_mask(valid, xs, ys, zs)
++    # distance to the outer area; the grid border is not outer, so pad by edge
++    dist = ndimage.distance_transform_edt(np.pad(inner, 1, mode="edge"))[1:-1, 1:-1, 1:-1]
++    inv &= ~((np.asarray(levels) == 0) & (dist <= skin_cells))
++    lab, n = ndimage.label(inv)
++    if n:
++        sizes = np.bincount(lab.ravel())
++        inv &= (sizes >= min_piece)[lab] & (lab > 0)
++    return inv
++
++
++def voxel_mesh(mask: np.ndarray, xs, ys, zs):
++    """(vertices (n,3) float, triangles (m,3) int) of the surface of *mask*."""
++    mask = np.asarray(mask, dtype=bool)
++    axes = [np.asarray(a, dtype=float) for a in (xs, ys, zs)]
++    step = [float(np.diff(a).mean()) for a in axes]
++    padded = np.pad(mask, 1)
++    quads = []                                           # (k, 4, 3) in half-step integer units
++    for ax in range(3):
++        u, v = (ax + 1) % 3, (ax + 2) % 3
++        for s in (-1, 1):
++            neighbour = np.roll(padded, -s, axis=ax)     # neighbour[i] = padded[i + s]
++            idx = np.argwhere(padded & ~neighbour) - 1   # back to unpadded voxel index
++            if not len(idx):
++                continue
++            c = 2 * idx
++            c[:, ax] += s
++            corners = []
++            for du, dv in ((-1, -1), (1, -1), (1, 1), (-1, 1)):   # u x v = +ax, CCW seen from +ax
++                p = c.copy()
++                p[:, u] += du
++                p[:, v] += dv
++                corners.append(p)
++            q = np.stack(corners, 1)
++            quads.append(q if s > 0 else q[:, ::-1])               # flip winding for the -ax faces
++    if not quads:
++        return np.empty((0, 3)), np.empty((0, 3), dtype=int)
++    q = np.concatenate(quads)
++    uniq, inv = np.unique(q.reshape(-1, 3), axis=0, return_inverse=True)
++    inv = inv.reshape(-1, 4)
++    tris = np.concatenate([inv[:, [0, 1, 2]], inv[:, [0, 2, 3]]])
++    verts = np.stack([axes[k][0] + uniq[:, k] / 2.0 * step[k] for k in range(3)], 1)
++    return verts, tris
++
++
++#: material name -> (diffuse RGB, opacity)
++MATERIALS = {"valid": ((0.0, 0.8, 0.0), 0.5), "invalid": ((0.9, 0.0, 0.0), 0.5)}
++
++
++def write_mtl(path: str) -> None:
++    with open(path, "w", newline="\n") as f:
++        for name, (rgb, alpha) in MATERIALS.items():
++            r, g, b = rgb
++            f.write(f"newmtl {name}\nKa {r} {g} {b}\nKd {r} {g} {b}\nKs 0 0 0\n"
++                    f"d {alpha}\nTr {1 - alpha}\nillum 1\n\n")
++
++
++TRAY_AXES = "x lateral, y up, z approach"
++
++
++def write_obj(path: str, verts, tris, name: str, comment: str, mtl: str | None = None,
++              axes: str = TRAY_AXES) -> None:
++    with open(path, "w", newline="\n") as f:
++        f.write(f"# {comment}\n# units: metres; {axes}; origin at the robot base\n")
++        if mtl:
++            f.write(f"mtllib {mtl}\n")
++        f.write(f"o {name}\n")
++        if mtl:
++            f.write(f"usemtl {name}\n")
++        np.savetxt(f, verts, fmt="v %.6f %.6f %.6f")
++        np.savetxt(f, tris + 1, fmt="f %d %d %d")
++
++
++def export(d, stem: str, axes: str = TRAY_AXES) -> list[str]:
++    paths = []
++    mtl = os.path.basename(stem) + ".mtl"
++    write_mtl(os.path.join(os.path.dirname(stem), mtl))
++    areas = {"valid": d["valid"], "invalid": invalid_area(d["inner"], d["valid"], d["levels"],
++                                              d["xs"], d["ys"], d["zs"])}
++    for name, mask in areas.items():
++        verts, tris = voxel_mesh(mask, d["xs"], d["ys"], d["zs"])
++        path = f"{stem}_{name}.obj"
++        write_obj(path, verts, tris, name,
++                  f"{name} area of {os.path.basename(stem)}: {int(mask.sum())} voxels", mtl, axes)
++        print(f"wrote {path}  {len(verts)} vertices, {len(tris)} triangles")
++        paths.append(path)
++    return paths
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--src", nargs="+", required=True, help="*_binary.npz files")
++    args = ap.parse_args()
++    for src in args.src:
++        with np.load(src) as d:
++            export({k: d[k] for k in d.files}, src[:-len("_binary.npz")])
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/reach_volume/export_tm_meshes.py b/scripts/reach_volume/export_tm_meshes.py
+new file mode 100644
+index 0000000..a6efbfa
+--- /dev/null
++++ b/scripts/reach_volume/export_tm_meshes.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python3
++"""Valid / invalid (cleaned) meshes from a reach_volume_tm.py result.
++
++Grid points are re-keyed from the label centre (spec Section 4) to the tray's
++front-centre-bottom (spec Section 5 offsets), but stay in the ROBOT BASE frame
++(x, y = approach, z = up); no axis flip or permutation. Then: binarize (sphere
++fit, Section 6) -> export valid + cleaned invalid as OBJ (+ .mtl).
++
++    python scripts/reach_volume/export_tm_meshes.py out/reach_volume_tm.npz
++    python scripts/reach_volume/export_tm_meshes.py <npz> --use-ik-levels   # IK-only verdict
++"""
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import binarize_reach_volume as B      # noqa: E402
++import export_reach_volume_obj as E    # noqa: E402
++
++#: Label centre -> tray front-centre-bottom, in base axes (m).
++APPROACH_OFFSET = 0.022 + 0.0115       # base +Y
++UP_OFFSET = 0.035 + 0.015              # base +Z
++AXES = "robot base frame (x, y approach, z up); point = tray front-centre-bottom"
++
++
++def to_tray_point(d: dict, level_key: str = "levels") -> dict:
++    return {
++        "xs": np.asarray(d["xs"], dtype=float),
++        "ys": np.round(np.asarray(d["ys"], dtype=float) + APPROACH_OFFSET, 6),
++        "zs": np.round(np.asarray(d["zs"], dtype=float) + UP_OFFSET, 6),
++        "levels": np.asarray(d[level_key]),
++        "phases": d["phases"],
++        "preset": d["preset"],
++        "frame": np.array(AXES),
++    }
++
++
++def signed_volume(v, t) -> float:
++    a, b, c = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
++    return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6.0)
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("src")
++    ap.add_argument("--use-ik-levels", action="store_true", help="mesh the IK-only verdict")
++    args = ap.parse_args()
++
++    with np.load(args.src) as f:
++        d = {k: f[k] for k in f.files}
++    if "done" in d and not d["done"].all():
++        print(f"incomplete run: {int(d['done'].sum())}/{d['done'].size} columns")
++        return 2
++    key = "levels_ik" if args.use_ik_levels else "levels"
++    stem = args.src[:-4] + ("_ik" if args.use_ik_levels and key != "levels" else "") + "_tray_base"
++
++    out = B.binarize(to_tray_point(d, key))
++    np.savez(stem + "_binary.npz", **out)
++    print(B.report(out))
++
++    step = [float(np.diff(out[k]).mean()) for k in ("xs", "ys", "zs")]
++    cell = float(np.prod(step))
++    masks = {"valid": out["valid"],
++             "invalid": E.invalid_area(out["inner"], out["valid"], out["levels"],
++                                       out["xs"], out["ys"], out["zs"])}
++    for name, m in masks.items():
++        v, t = E.voxel_mesh(m, out["xs"], out["ys"], out["zs"])
++        vol, want = signed_volume(v, t), int(m.sum()) * cell
++        ok = np.isclose(vol, want, rtol=1e-9, atol=1e-12)
++        print(f"  {name:<8} {int(m.sum()):6d} voxels  mesh volume {vol:.6f} m^3  "
++              f"expected {want:.6f}  {'OK' if ok else 'MISMATCH'}")
++        if not ok:
++            return 3
++    E.export(out, stem, axes=AXES)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/reach_volume/reach_volume_planner.py b/scripts/reach_volume/reach_volume_planner.py
+new file mode 100644
+index 0000000..cd896ad
+--- /dev/null
++++ b/scripts/reach_volume/reach_volume_planner.py
+@@ -0,0 +1,200 @@
++#!/usr/bin/env python3
++"""Reach volume of reach_volume_tm.py, planned locally with ``motion_planner``.
++
++Same grid, phases and flange poses as reach_volume_tm.py, but IK and motions come
++from the calibrated pinocchio model (``default_planner("pinocchio")``), no controller:
++
++* sight_far, sight_near, pre_insert: reached if the pose has an IK solution within
++  the joint limits (PTP: any configuration).
++* insert, lift, withdraw: LINE_T from the previous phase, planned with
++  ``plan_line_t(on_discontinuity=--mode)``. The chain starts from every IK solution
++  of pre_insert (largest joint-limit margin first), each LINE_T starts where the
++  previous one ended, and the point keeps the best chain.
++* carry == withdraw (tilt 0): reached with withdraw.
++
++``levels_ik`` = IK-only levels; ``levels`` = with the LINE_T motions. The npz has the
++reach_volume_tm.py layout, so export_tm_meshes.py works unchanged. Checkpointed every
++few columns; rerun to resume.
++
++    python scripts/reach_volume/reach_volume_planner.py --step 0.1 --out out/preview_planner.npz
++    python scripts/reach_volume/reach_volume_planner.py --out out/reach_volume_planner.npz
++"""
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++import time
++import warnings
++from concurrent.futures import ProcessPoolExecutor, as_completed
++
++import numpy as np
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++
++import reach_volume_tm as RV  # noqa: E402
++from motion_planner import IKError, PathDiscontinuityError, pose_to_matrix  # noqa: E402
++
++#: Index of pre_insert; the phases after it up to withdraw are LINE_T motions.
++LINE_FROM = RV.PHASES.index("pre_insert")
++LINE_TO = RV.PHASES.index("withdraw")
++VELOCITY, ACC_TIME = 100.0, 0.2
++
++
++def phase_matrices(point) -> list[np.ndarray]:
++    """4x4 flange poses (m) of the 7 phases for a label-centre point (m)."""
++    return [pose_to_matrix([*p[:3] / 1e3, *np.radians(p[3:])]) for p in RV.flange_poses(point)]
++
++
++def _chain(planner, q, goals, mode) -> tuple[int, bool]:
++    """Number of LINE_T *goals* reached one after the other from *q*; timed out?"""
++    for n, T in enumerate(goals):
++        diag: dict = {}
++        try:
++            plan = planner.plan_line_t(q, T, VELOCITY, ACC_TIME, on_discontinuity=mode,
++                                       diagnostics=diag)
++        except (IKError, PathDiscontinuityError):
++            return n, bool(diag.get("search", {}).get("stats", {}).get("timed_out", False))
++        if plan:
++            q = np.asarray(plan[-1].positions, dtype=float)
++    return len(goals), False
++
++
++def point_levels(planner, poses, mode: str = "hold") -> tuple[int, int, int]:
++    """(IK-only level, LINE_T level, number of timed-out plans) of one grid point."""
++    level_ik, starts = 0, []
++    for k, T in enumerate(poses[:RV.DISTINCT]):
++        sols = planner.solver.ik_analytical(T)
++        if not sols:
++            break
++        level_ik = k + 1
++        if k == LINE_FROM:
++            starts = sols
++    if level_ik == RV.DISTINCT:
++        level_ik = len(RV.PHASES)                 # carry == withdraw
++    if level_ik <= LINE_FROM + 1:
++        return level_ik, level_ik, 0
++
++    goals = poses[LINE_FROM + 1:LINE_TO + 1]
++    lo, hi = planner.solver.lower_limits, planner.solver.upper_limits
++    # Starts far from the joint limits succeed far more often: try them first.
++    starts = sorted((np.asarray(q, dtype=float) for q in starts),
++                    key=lambda q: -float(np.min(np.minimum(q - lo, hi - q))))
++    best, timeouts = 0, 0
++    for q in starts:
++        n, late = _chain(planner, q, goals, mode)
++        best, timeouts = max(best, n), timeouts + late
++        if best == len(goals):
++            break
++    level = LINE_FROM + 1 + best
++    if level == RV.DISTINCT:
++        level = len(RV.PHASES)
++    return level_ik, level, timeouts
++
++
++def column_levels(planner, x: float, y: float, zs, mode: str):
++    """(levels_ik, levels, timeouts) of one (x, y) column."""
++    n = len(zs)
++    lv_ik, lv = np.zeros(n, dtype=np.int8), np.zeros(n, dtype=np.int8)
++    timeouts = 0
++    for i, z in enumerate(zs):
++        a, b, t = point_levels(planner, phase_matrices((x, y, z)), mode)
++        lv_ik[i], lv[i] = a, b
++        timeouts += t
++    return lv_ik, lv, timeouts
++
++
++_planner = None
++
++
++def _init_worker(max_plan_time: float) -> None:
++    global _planner
++    from motion_planner import default_planner
++    warnings.simplefilter("ignore")
++    _planner = default_planner("pinocchio")
++    _planner.max_plan_time = max_plan_time
++
++
++def _run_column(task):
++    i, j, x, y, zs, mode = task
++    return (i, j, *column_levels(_planner, x, y, zs, mode))
++
++
++def save(path, xs, ys, zs, lv_ik, lv, done, timeouts, mode, max_plan_time):
++    tmp = path[:-4] + ".partial.npz"
++    np.savez(tmp, xs=xs, ys=ys, zs=zs, levels=lv, levels_ik=lv_ik, done=done, timeouts=timeouts,
++             phases=np.array(RV.PHASES), preset=np.array("strict"),
++             line_phases=np.array(RV.PHASES[LINE_FROM + 1:LINE_TO + 1]),
++             mode=np.array(mode), max_plan_time=np.array(max_plan_time),
++             planner=np.array("motion_planner default_planner('pinocchio')"),
++             frame=np.array("label centre; robot base frame (x, y approach, z up)"))
++    os.replace(tmp, path)
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--step", type=float, default=0.05)
++    ap.add_argument("--x", type=float, nargs=2, default=(-1.2, 1.2))
++    ap.add_argument("--y", type=float, nargs=2, default=(0.0, 1.4))
++    ap.add_argument("--z", type=float, nargs=2, default=(-1.2, 1.2))
++    ap.add_argument("--mode", choices=("raise", "hold", "jump"), default="hold",
++                    help="plan_line_t on_discontinuity (default hold)")
++    ap.add_argument("--max-plan-time", type=float, default=10.0,
++                    help="LINE_T planning budget per motion, s (timeouts count as failures)")
++    ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++
++    xs, ys, zs = RV.axis(*args.x, args.step), RV.axis(*args.y, args.step), RV.axis(*args.z, args.step)
++    shape = (len(xs), len(ys), len(zs))
++    lv_ik = np.zeros(shape, dtype=np.int8)
++    lv = np.zeros(shape, dtype=np.int8)
++    timeouts = np.zeros(shape[:2], dtype=np.int32)
++    done = np.zeros(shape[:2], dtype=bool)
++    if os.path.exists(args.out):
++        with np.load(args.out) as d:
++            if not (np.array_equal(d["xs"], xs) and np.array_equal(d["ys"], ys)
++                    and np.array_equal(d["zs"], zs) and str(d["mode"]) == args.mode):
++                print("existing --out has a different grid/mode; refusing to overwrite")
++                return 2
++            lv_ik, lv, done = d["levels_ik"].copy(), d["levels"].copy(), d["done"].copy()
++            timeouts = d["timeouts"].copy()
++        print(f"resuming: {int(done.sum())}/{done.size} columns done")
++
++    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
++    print(f"grid {shape[0]}x{shape[1]}x{shape[2]} = {int(np.prod(shape))} points, mode={args.mode}, "
++          f"max_plan_time={args.max_plan_time} s, {args.workers} workers", flush=True)
++    todo = [(i, j, float(xs[i]), float(ys[j]), zs, args.mode)
++            for i in range(shape[0]) for j in range(shape[1]) if not done[i, j]]
++    t0 = time.time()
++    try:
++        with ProcessPoolExecutor(args.workers, initializer=_init_worker,
++                                 initargs=(args.max_plan_time,)) as pool:
++            # as completed: a slow column (all starts fail -> every start is planned,
++            # up to ~1 min) must not hold back progress and checkpoints of the others
++            futures = [pool.submit(_run_column, task) for task in todo]
++            for count, fut in enumerate(as_completed(futures), 1):
++                i, j, a, b, t = fut.result()
++                lv_ik[i, j], lv[i, j], timeouts[i, j], done[i, j] = a, b, t, True
++                if count % 20 == 0 or count == len(todo):
++                    save(args.out, xs, ys, zs, lv_ik, lv, done, timeouts, args.mode, args.max_plan_time)
++                el = time.time() - t0
++                eta = el / count * (len(todo) - count)
++                print(f"\r  columns {count}/{len(todo)}  {el:6.0f}s  eta {eta:6.0f}s", end="", flush=True)
++    finally:
++        save(args.out, xs, ys, zs, lv_ik, lv, done, timeouts, args.mode, args.max_plan_time)
++    print()
++
++    total = int(np.prod(shape))
++    print("level  phase        ik_only  line_t")
++    for k in range(len(RV.PHASES) + 1):
++        nm = "none" if k == 0 else RV.PHASES[k - 1]
++        print(f"  {k}    {nm:<11} {int((lv_ik == k).sum()):7d}  {int((lv == k).sum()):7d}")
++    assert (lv <= lv_ik).all(), "LINE_T level must not exceed IK level"
++    print(f"sum = {total}; timed-out plans {int(timeouts.sum())}; wrote {args.out}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/reach_volume/reach_volume_tm.py b/scripts/reach_volume/reach_volume_tm.py
+new file mode 100644
+index 0000000..7bc0f52
+--- /dev/null
++++ b/scripts/reach_volume/reach_volume_tm.py
+@@ -0,0 +1,225 @@
++#!/usr/bin/env python3
++"""Reach-volume experiment (tmp/REACH_VOLUME_EXPERIMENT.md) solved on a Techman controller.
++
++IK and collision come from TMscript through the Listen node (port 5890):
++
++* IK: ``inversekin(pose, {c1,c2,c3})`` for all 8 configurations; a phase is reached
++  if any configuration returns a solution (inversekin enforces the joint limits).
++* Collision (``--collision``): a phase also needs one IK solution for which
++  ``CollisionCheck(safety, PTP("JPP", q, ...))`` returns "". NOTE: CollisionCheck
++  simulates the PTP *path* from the controller's current pose to q, not just q.
++
++The controller walks a whole (x, y) column of z values per script and returns
++``int[2n]``: n IK-only levels, then n collision levels (= IK levels without
++``--collision``). Results are checkpointed after every column; rerun to resume.
++
++    python scripts/reach_volume/reach_volume_tm.py --step 0.1 --out out/preview.npz
++    python scripts/reach_volume/reach_volume_tm.py --out out/reach_volume_tm.npz
++"""
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++import time
++
++import numpy as np
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++
++PHASES = ("sight_far", "sight_near", "pre_insert", "insert", "lift", "withdraw", "carry")
++
++# Section 3, flange position relative to the label centre (m): (approach = base +Y, height = base Z).
++CAM_Z, CAM_Y = 0.044217, 0.075155            # EIH camera optical centre, flange z / y
++PLATE_TIP = 0.321
++LIFT = 0.02125
++PHASE_OFFSETS = {
++    "sight_far":  (-0.350 - CAM_Z, -CAM_Y),
++    "sight_near": (-0.2768 - CAM_Z, -CAM_Y),
++    "pre_insert": (-0.010 - PLATE_TIP, 0.07725),
++    "insert":     (0.022 + 0.218 - PLATE_TIP, 0.07725),
++    "lift":       (0.022 + 0.218 - PLATE_TIP, 0.07725 + LIFT),
++    "withdraw":   (-0.010 - PLATE_TIP, 0.07725 + LIFT),
++    "carry":      (-0.010 - PLATE_TIP, 0.07725 + LIFT),   # carry tilt 0 deg -> same pose as withdraw
++}
++# Fixed flange orientation, TM Euler (deg): flange z = base +Y, flange y = base +Z, flange x = -base X.
++# Verified on the controller: forwardkin(inversekin({0,619,277,90,0,180})) round-trips.
++RPY = (90.0, 0.0, 180.0)
++CONFIGS = [(a, b, c) for a in (0, 1) for b in (2, 3) for c in (4, 5)]
++#: carry == withdraw (tilt 0), so the controller only walks the first 6 phases.
++DISTINCT = 6
++
++
++def flange_poses(point) -> np.ndarray:
++    """(7, 6) TM poses {X,Y,Z mm, RX,RY,RZ deg} of the 7 phases for a label-centre point (m)."""
++    x, y, z = point
++    return np.array([[x * 1e3, (y + da) * 1e3, (z + dh) * 1e3, *RPY]
++                     for da, dh in (PHASE_OFFSETS[p] for p in PHASES)])
++
++
++def _arr(vals, fmt="{:.4f}") -> str:
++    return "{" + ",".join(fmt.format(v) for v in vals) + "}"
++
++
++def column_script(x: float, y: float, zs, collision: bool, safety_mm: float = 0.0) -> str:
++    """TMscript that walks one (x, y) column and ListenSends int[2n] levels."""
++    n = len(zs)
++    da = [PHASE_OFFSETS[p][0] * 1e3 for p in PHASES[:DISTINCT]]
++    dh = [PHASE_OFFSETS[p][1] * 1e3 for p in PHASES[:DISTINCT]]
++    zero = _arr([0] * (2 * n), "{}")
++    col = "true" if collision else "false"
++    rx, ry, rz = RPY
++    lines = [
++        "if (true) {",
++        f"float rvX = {x * 1e3:.4f}",
++        f"float rvY = {y * 1e3:.4f}",
++        f"float[] rvZ = {_arr([z * 1e3 for z in zs])}",
++        f"float[] rvDA = {_arr(da)}",
++        f"float[] rvDH = {_arr(dh)}",
++        f"int[] rvC1 = {_arr([c[0] for c in CONFIGS], '{}')}",
++        f"int[] rvC2 = {_arr([c[1] for c in CONFIGS], '{}')}",
++        f"int[] rvC3 = {_arr([c[2] for c in CONFIGS], '{}')}",
++        f"int[] rvLV = {zero}",
++        f"for (int i = 0; i < {n}; i++) {{",
++        " bool aik = true",
++        f" bool acol = {col}",
++        " int k = 0",
++        f" while (aik && k < {DISTINCT}) {{",
++        f"  float[] pose = {{rvX, rvY + rvDA[k], rvZ[i] + rvDH[k], {rx}, {ry}, {rz}}}",
++        "  bool okik = false",
++        "  bool okcol = false",
++        "  int c = 0",
++        "  while (c < 8 && !(okik && (okcol || !acol))) {",
++        "   float[] q = inversekin(pose, {rvC1[c], rvC2[c], rvC3[c]})",
++        "   if (Length(q) == 6) {",
++        "    okik = true",
++        "    if (acol) {",
++        f"     string r = CollisionCheck({safety_mm}, PTP(\"JPP\", q, 100, 200, 0, false))",
++        "     if (r == \"\") {",
++        "      okcol = true",
++        "     }",
++        "    }",
++        "   }",
++        "   c++",
++        "  }",
++        "  aik = okik",
++        "  acol = acol && okcol",
++        "  if (aik) {",
++        "   rvLV[i] = k + 1",
++        "  }",
++        "  if (acol) {",
++        f"   rvLV[i + {n}] = k + 1",
++        "  }",
++        "  k++",
++        " }",
++        "}",
++        "ListenSend(90, rvLV)",
++        "}",
++    ]
++    return "\r\n".join(lines)
++
++
++def decode_column(payload: bytes, n: int, collision: bool) -> tuple[np.ndarray, np.ndarray]:
++    """(levels_ik, levels) for one column; level 6 -> 7 because carry == withdraw."""
++    v = np.frombuffer(payload, dtype="<i4")        # tm_eval.as_i32, without the robot package
++    if len(v) != 2 * n:
++        raise ValueError(f"expected {2 * n} ints, got {len(v)}")
++    ik, lc = v[:n].astype(np.int8), v[n:].astype(np.int8)
++    ik[ik == DISTINCT] = len(PHASES)
++    lc[lc == DISTINCT] = len(PHASES)
++    return ik, (lc if collision else ik.copy())
++
++
++def axis(lo, hi, step):
++    return np.round(np.arange(lo, hi + step / 2, step), 6)
++
++
++def save(path, xs, ys, zs, lv_ik, lv, done, collision, safety):
++    tmp = path[:-4] + ".partial.npz"
++    np.savez(tmp, xs=xs, ys=ys, zs=zs, levels=lv, levels_ik=lv_ik, done=done,
++             phases=np.array(PHASES), preset=np.array("strict"),
++             collision=np.array(collision), safety_mm=np.array(safety),
++             frame=np.array("label centre; robot base frame (x, y approach, z up)"))
++    os.replace(tmp, path)
++
++
++def main() -> int:
++    from tm_eval import TMEval
++
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--ip", default="10.105.20.164")
++    ap.add_argument("--step", type=float, default=0.05)
++    ap.add_argument("--x", type=float, nargs=2, default=(-1.2, 1.2))
++    ap.add_argument("--y", type=float, nargs=2, default=(0.0, 1.4))
++    ap.add_argument("--z", type=float, nargs=2, default=(-1.2, 1.2))
++    ap.add_argument("--collision", action="store_true", help="also run CollisionCheck (slow)")
++    ap.add_argument("--safety", type=float, default=0.0, help="CollisionCheck safety distance, mm")
++    ap.add_argument("--only-ik-reached", default=None,
++                    help="IK-only npz: skip columns whose IK levels are all 0 (collision runs)")
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++
++    xs, ys, zs = axis(*args.x, args.step), axis(*args.y, args.step), axis(*args.z, args.step)
++    shape = (len(xs), len(ys), len(zs))
++    lv_ik = np.zeros(shape, dtype=np.int8)
++    lv = np.zeros(shape, dtype=np.int8)
++    done = np.zeros(shape[:2], dtype=bool)
++    if os.path.exists(args.out):
++        with np.load(args.out) as d:
++            if not (np.array_equal(d["xs"], xs) and np.array_equal(d["ys"], ys)
++                    and np.array_equal(d["zs"], zs) and bool(d["collision"]) == args.collision):
++                print("existing --out has a different grid/mode; refusing to overwrite")
++                return 2
++            lv_ik, lv, done = d["levels_ik"].copy(), d["levels"].copy(), d["done"].copy()
++        print(f"resuming: {int(done.sum())}/{done.size} columns done")
++
++    skip = np.zeros(shape[:2], dtype=bool)
++    if args.only_ik_reached:
++        with np.load(args.only_ik_reached) as d:
++            if not (np.array_equal(d["xs"], xs) and np.array_equal(d["ys"], ys)
++                    and np.array_equal(d["zs"], zs)):
++                print("--only-ik-reached grid differs")
++                return 2
++            skip = ~(d["levels_ik"] > 0).any(axis=2)
++
++    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
++    print(f"grid {shape[0]}x{shape[1]}x{shape[2]} = {int(np.prod(shape))} points, "
++          f"collision={args.collision} safety={args.safety} mm, controller {args.ip}", flush=True)
++    tm = TMEval(args.ip)
++    t0, n_run = time.time(), 0
++    todo = [(i, j) for i in range(shape[0]) for j in range(shape[1]) if not done[i, j]]
++    try:
++        for count, (i, j) in enumerate(todo, 1):
++            if skip[i, j]:
++                done[i, j] = True             # all-zero column: levels stay 0
++                continue
++            script = column_script(xs[i], ys[j], zs, args.collision, args.safety)
++            timeout = 60 + (len(zs) * DISTINCT * 8 * 1.0 if args.collision else 0)
++            payload = tm.run(script, timeout=timeout)
++            lv_ik[i, j], lv[i, j] = decode_column(payload, len(zs), args.collision)
++            done[i, j] = True
++            n_run += 1
++            if n_run % 10 == 0 or count == len(todo):
++                save(args.out, xs, ys, zs, lv_ik, lv, done, args.collision, args.safety)
++            el = time.time() - t0
++            eta = el / count * (len(todo) - count)
++            print(f"\r  columns {count}/{len(todo)}  {el:6.0f}s  eta {eta:6.0f}s", end="", flush=True)
++    finally:
++        save(args.out, xs, ys, zs, lv_ik, lv, done, args.collision, args.safety)
++        tm.close()
++    print()
++
++    total = int(np.prod(shape))
++    print("level  phase        ik_only  verdict")
++    for k in range(len(PHASES) + 1):
++        nm = "none" if k == 0 else PHASES[k - 1]
++        print(f"  {k}    {nm:<11} {int((lv_ik == k).sum()):7d}  {int((lv == k).sum()):7d}")
++    assert int(np.bincount(lv.ravel(), minlength=8).sum()) == total
++    assert (lv <= lv_ik).all(), "collision level must not exceed IK level"
++    print(f"sum = {total}; wrote {args.out}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/unit/test_binarize_reach_volume.py b/tests/unit/test_binarize_reach_volume.py
+new file mode 100644
+index 0000000..0665727
+--- /dev/null
++++ b/tests/unit/test_binarize_reach_volume.py
+@@ -0,0 +1,62 @@
++"""Synthetic check of the sphere fit and the outer / invalid / valid split: a
++half sphere (flat cut where the grid ends) with enclosed holes, a surface notch
++and an unreachable core touching the cut."""
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "reach_volume"))
++import binarize_reach_volume as B   # noqa: E402
++
++STEP = 0.025
++C0 = np.array([0.02, 0.10, 0.25])
++R0 = 0.5
++FULL = 7
++
++
++def _volume():
++    xs = np.round(np.arange(-0.7, 0.7001, STEP), 6)
++    ys = np.round(np.arange(-0.6, 0.8001, STEP), 6)
++    zs = np.round(np.arange(0.0, 1.2001, STEP), 6)
++    X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
++    P = np.stack([X, Y, Z], -1)
++    dist = np.linalg.norm(P - C0, axis=-1)
++    inside = dist <= R0
++    levels = np.where(inside, FULL, 0).astype(np.int8)
++    rng = np.random.default_rng(0)
++    partial = inside & (rng.random(inside.shape) < 0.08)
++    levels[partial] = 3                                      # reached, not every action
++    hole = np.linalg.norm(P - (C0 + [0.1, 0.1, 0.25]), axis=-1) < 0.07
++    levels[hole] = 0                                         # enclosed void
++    core = np.linalg.norm(P - [C0[0], C0[1], 0.0], axis=-1) < 0.15
++    levels[core] = 0                                         # unreachable core on the cut face
++    notch = (dist > R0 - 0.1) & (X > 0.2) & (Y > 0.35) & (Y < 0.45)
++    levels[notch] = 0                                        # notch open to the outside
++    d = dict(xs=xs, ys=ys, zs=zs, levels=levels, phases=np.arange(FULL).astype(str),
++             preset=np.array("synthetic"))
++    return d, inside, hole
++
++
++def test_sphere_recovered_despite_holes_notch_and_core():
++    d, _, _ = _volume()
++    out = B.binarize(d)
++    assert np.linalg.norm(out["sphere_centre"] - C0) < 0.02
++    assert abs(float(out["sphere_radius"]) - R0) < 0.02
++
++
++def test_split_follows_inside_and_level():
++    d, inside, hole = _volume()
++    out = B.binarize(d)
++    lv, lab = d["levels"], out["label"]
++    assert (lab[hole] == B.INVALID).all()                    # enclosed hole is inner, invalid
++    assert (lab[(lv == FULL)] == B.VALID).all()              # all actions passed -> valid
++    assert (lab[(lv > 0) & (lv < FULL)] == B.INVALID).all()  # partial -> invalid
++    assert (lab == B.VALID).sum() == (lv == FULL).sum()      # nothing else is valid
++    far = np.linalg.norm(np.stack(np.meshgrid(d["xs"], d["ys"], d["zs"], indexing="ij"), -1) - C0,
++                         axis=-1) > R0 + 2 * STEP
++    assert (lab[far] == B.OUTER).all()
++    assert out["valid"].dtype == bool and out["inner"].dtype == bool
++    assert ((lab == B.OUTER) == ~out["inner"]).all()
++    # the core touching the cut face is part of the inner area too
++    assert (lab[(inside) & (lv == 0) & ~hole] != B.OUTER).sum() > 0
+diff --git a/tests/unit/test_export_reach_volume_obj.py b/tests/unit/test_export_reach_volume_obj.py
+new file mode 100644
+index 0000000..d245482
+--- /dev/null
++++ b/tests/unit/test_export_reach_volume_obj.py
+@@ -0,0 +1,135 @@
++"""The exported mesh must enclose exactly the labelled voxels, facing outward."""
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "reach_volume"))
++import export_reach_volume_obj as E   # noqa: E402
++
++
++def _signed_volume(v, t):
++    a, b, c = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
++    return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6.0)
++
++
++def _grid(shape=(6, 5, 7)):
++    return (np.round(np.arange(shape[0]) * 0.05 - 0.1, 6),
++            np.round(np.arange(shape[1]) * 0.04 + 0.2, 6),
++            np.round(np.arange(shape[2]) * 0.06 - 0.3, 6))
++
++
++def test_single_voxel_is_a_unit_box():
++    xs, ys, zs = _grid()
++    m = np.zeros((6, 5, 7), bool)
++    m[2, 3, 4] = True
++    v, t = E.voxel_mesh(m, xs, ys, zs)
++    assert len(v) == 8 and len(t) == 12
++    lo, hi = v.min(0), v.max(0)
++    assert np.allclose(lo, [xs[2] - 0.025, ys[3] - 0.02, zs[4] - 0.03])
++    assert np.allclose(hi - lo, [0.05, 0.04, 0.06])
++    assert np.isclose(_signed_volume(v, t), 0.05 * 0.04 * 0.06)       # positive: outward
++
++
++def test_volume_and_watertight_with_hole_and_edge_voxels():
++    xs, ys, zs = _grid()
++    m = np.zeros((6, 5, 7), bool)
++    m[0:5, 0:4, 0:6] = True                                           # touches the grid border
++    m[2, 2, 2] = False                                                # enclosed cavity
++    v, t = E.voxel_mesh(m, xs, ys, zs)
++    assert np.isclose(_signed_volume(v, t), m.sum() * 0.05 * 0.04 * 0.06)
++    edges = np.sort(np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]), axis=1)
++    _, counts = np.unique(edges, axis=0, return_counts=True)
++    assert (counts % 2 == 0).all()                                    # every edge is shared
++
++
++def test_obj_file_roundtrip(tmp_path):
++    xs, ys, zs = _grid()
++    m = np.zeros((6, 5, 7), bool)
++    m[1:3, 1:3, 1:3] = True
++    v, t = E.voxel_mesh(m, xs, ys, zs)
++    p = tmp_path / "a.obj"
++    E.write_obj(str(p), v, t, "a", "test")
++    lines = p.read_text().splitlines()
++    v2 = np.array([[float(x) for x in l.split()[1:]] for l in lines if l.startswith("v ")])
++    t2 = np.array([[int(x) for x in l.split()[1:]] for l in lines if l.startswith("f ")]) - 1
++    assert np.allclose(v2, v, atol=1e-6) and (t2 == t).all()
++    assert np.isclose(_signed_volume(v2, t2), 8 * 0.05 * 0.04 * 0.06)
++
++
++def test_materials_green_red_semi_transparent(tmp_path):
++    xs, ys, zs = _grid((8, 8, 8))
++    d = dict(xs=xs, ys=ys, zs=zs, valid=np.zeros((8, 8, 8), bool), inner=np.zeros((8, 8, 8), bool),
++             levels=np.full((8, 8, 8), 3, np.int8))
++    d["inner"][1:7, 1:7, 1:7] = True
++    d["valid"][1:7, 1:7, 1:7] = True
++    d["valid"][2:5, 2:5, 2:5] = False                    # 27-voxel hole: the invalid area
++    stem = str(tmp_path / "vol")
++    E.export(d, stem)
++    mtl = {}
++    cur = None
++    for line in (tmp_path / "vol.mtl").read_text().splitlines():
++        k, _, rest = line.partition(" ")
++        if k == "newmtl":
++            cur = mtl.setdefault(rest, {})
++        elif cur is not None and rest:
++            cur[k] = [float(x) for x in rest.split()]
++    g, r = mtl["valid"]["Kd"], mtl["invalid"]["Kd"]
++    assert g[1] > g[0] and g[1] > g[2]                 # green dominant
++    assert r[0] > r[1] and r[0] > r[2]                 # red dominant
++    for m in mtl.values():
++        assert 0.0 < m["d"][0] < 1.0                   # slightly transparent
++    for name in ("valid", "invalid"):
++        lines = (tmp_path / f"vol_{name}.obj").read_text().splitlines()
++        assert "mtllib vol.mtl" in lines and f"usemtl {name}" in lines
++
++
++def _ball(n=21):
++    g = np.indices((n, n, n)) - n // 2
++    axis = (np.arange(n) - n // 2) * 0.05
++    return g, np.sqrt((g ** 2).sum(0)), (axis, axis, axis)
++
++
++def test_invalid_area_is_clipped_to_the_hull_of_the_valid_area():
++    g, rho, (xs, ys, zs) = _ball()
++    inner = rho <= 9
++    levels = np.zeros(rho.shape, np.int8)
++    levels[rho <= 6] = 7                                     # valid body
++    band = (rho > 3.5) & (rho <= 5.5)
++    levels[band] = 3                                         # failed ring inside the valid body
++    pocket = (np.abs(g) <= 1).all(0)
++    levels[pocket] = 0                                       # unreached pocket inside it
++    speck = (g[0] == 6) & (g[1] == 0) & (g[2] == 0)
++    levels[speck] = 3                                        # lone failed voxel
++    shell = (rho > 7.5) & (rho <= 9)
++    levels[shell] = 3                                        # failed, but outside the valid body
++    valid = levels == 7
++
++    inv = E.invalid_area(inner, valid, levels, xs, ys, zs)
++    hull = E.hull_mask(valid, xs, ys, zs)
++
++    assert inv[band].all()                                   # inside the hull: kept
++    assert inv[pocket].all()
++    assert not inv[speck].any()                              # speck: dropped
++    assert not inv[shell].any()                              # outside the hull: dropped
++    assert not (inv & ~hull).any()                           # nothing outside the hull
++    assert not (inv & valid).any() and not (inv & ~inner).any()
++    assert hull[valid].all()
++
++
++def test_invalid_area_drops_unreached_skin_inside_the_hull():
++    g, rho, (xs, ys, zs) = _ball()
++    inner = rho <= 9
++    levels = np.where(inner, 7, 0).astype(np.int8)
++    dent = inner & (g[0] >= 6) & (np.abs(g[1]) <= 2) & (np.abs(g[2]) <= 2)
++    levels[dent] = 0                                         # unreached notch in the valid cap
++    valid = levels == 7
++    core = dent & (g[0] == 6) & (np.abs(g[1]) <= 1) & (np.abs(g[2]) <= 1)    # deep: >= 4 cells
++    skin = dent & (g[0] == 8) & (np.abs(g[1]) <= 1) & (np.abs(g[2]) <= 1)   # within 2 cells
++
++    inv = E.invalid_area(inner, valid, levels, xs, ys, zs)
++    loose = E.invalid_area(inner, valid, levels, xs, ys, zs, skin_cells=0)
++
++    assert loose[skin].all() and loose[core].all()           # both are inside the hull
++    assert inv[core].all()                                   # deep unreached: kept
++    assert not inv[skin].any()                               # unreached skin: dropped
+\ No newline at end of file
+diff --git a/tests/unit/test_export_tm_meshes.py b/tests/unit/test_export_tm_meshes.py
+new file mode 100644
+index 0000000..3e706d3
+--- /dev/null
++++ b/tests/unit/test_export_tm_meshes.py
+@@ -0,0 +1,23 @@
++"""Offline tests for export_tm_meshes."""
++from __future__ import annotations
++
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "reach_volume"))
++
++import export_tm_meshes as X  # noqa: E402
++
++
++def test_tray_point_offsets_in_base_frame():
++    d = {"xs": np.array([-0.05, 0.0, 0.05]), "ys": np.array([0.0, 0.05]), "zs": np.array([-0.1, 0.1]),
++         "levels": np.arange(12, dtype=np.int8).reshape(3, 2, 2), "levels_ik": np.zeros((3, 2, 2)),
++         "phases": np.array(["a"]), "preset": np.array("strict")}
++    out = X.to_tray_point(d)
++    np.testing.assert_allclose(out["xs"], d["xs"])                      # no flip
++    np.testing.assert_allclose(out["ys"], d["ys"] + 0.0335)
++    np.testing.assert_allclose(out["zs"], d["zs"] + 0.050)
++    np.testing.assert_array_equal(out["levels"], d["levels"])           # no permutation
++    np.testing.assert_array_equal(X.to_tray_point(d, "levels_ik")["levels"], d["levels_ik"])
+diff --git a/tests/unit/test_reach_volume_planner.py b/tests/unit/test_reach_volume_planner.py
+new file mode 100644
+index 0000000..0f88bb2
+--- /dev/null
++++ b/tests/unit/test_reach_volume_planner.py
+@@ -0,0 +1,164 @@
++"""Offline tests for reach_volume_planner (fake planner; no pinocchio needed)."""
++from __future__ import annotations
++
++import os
++import sys
++from types import SimpleNamespace
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "reach_volume"))
++
++import reach_volume_planner as RP  # noqa: E402
++from motion_planner import IKError, PathDiscontinuityError  # noqa: E402
++
++
++def phase_poses():
++    """7 fake goal matrices; T[0, 3] is the phase index (carry == withdraw)."""
++    out = []
++    for k in (0, 1, 2, 3, 4, 5, 5):
++        T = np.eye(4)
++        T[0, 3] = k
++        out.append(T)
++    return out
++
++
++class FakePlanner:
++    """ik: phase -> list of solutions; line(q_start, phase) -> end q, None = fails."""
++
++    def __init__(self, ik, line, timeout=False):
++        self.solver = SimpleNamespace(ik_analytical=lambda T: list(ik.get(int(T[0, 3]), [])),
++                                      lower_limits=np.full(6, -100.0),
++                                      upper_limits=np.full(6, 100.0))
++        self._line = line
++        self._timeout = timeout
++        self.calls = []
++
++    def plan_line_t(self, q0, goal, velocity, acc_time, on_discontinuity="raise", diagnostics=None):
++        k = int(goal[0, 3])
++        q0 = np.asarray(q0, dtype=float)
++        self.calls.append((float(q0[0]), k, on_discontinuity))
++        end = self._line(q0, k)
++        if end is None:
++            if diagnostics is not None:
++                diagnostics["search"] = {"stats": {"timed_out": self._timeout}}
++            raise PathDiscontinuityError("no line")
++        if end == "ikerror":
++            raise IKError("no goal IK")
++        if end == "empty":
++            return []
++        return [SimpleNamespace(positions=[float(end)] * 6)]
++
++
++def q(v):
++    return np.full(6, float(v))
++
++
++ALL_IK = {k: [q(10 * k)] for k in range(6)}
++
++
++def test_all_reached_gives_full_levels():
++    p = FakePlanner(ALL_IK, lambda q0, k: 10 * k)
++    assert RP.point_levels(p, phase_poses()) == (7, 7, 0)
++
++
++def test_lines_are_insert_lift_withdraw_only_and_use_mode():
++    p = FakePlanner(ALL_IK, lambda q0, k: 10 * k)
++    RP.point_levels(p, phase_poses(), mode="hold")
++    assert [k for _, k, _ in p.calls] == [3, 4, 5]
++    assert {m for _, _, m in p.calls} == {"hold"}
++
++
++def test_chain_starts_at_pre_insert_and_follows_last_waypoint():
++    p = FakePlanner(ALL_IK, lambda q0, k: q0[0] + 1)
++    RP.point_levels(p, phase_poses())
++    # pre_insert IK = 20 -> insert ends at 21 -> lift at 22
++    assert [s for s, _, _ in p.calls] == [20.0, 21.0, 22.0]
++
++
++def test_empty_plan_keeps_start():
++    p = FakePlanner(ALL_IK, lambda q0, k: "empty" if k == 4 else q0[0] + 1)
++    assert RP.point_levels(p, phase_poses()) == (7, 7, 0)
++    assert [s for s, _, _ in p.calls] == [20.0, 21.0, 21.0]
++
++
++def test_ik_failure_stops_both_levels():
++    ik = {k: v for k, v in ALL_IK.items() if k != 1}
++    p = FakePlanner(ik, lambda q0, k: 10 * k)
++    assert RP.point_levels(p, phase_poses()) == (1, 1, 0)
++    assert p.calls == []
++
++
++def test_line_failure_caps_level_but_not_ik_level():
++    p = FakePlanner(ALL_IK, lambda q0, k: None if k == 4 else 10 * k)
++    assert RP.point_levels(p, phase_poses()) == (7, 4, 0)
++
++
++def test_ik_error_in_line_counts_as_failure():
++    p = FakePlanner(ALL_IK, lambda q0, k: "ikerror" if k == 3 else 10 * k)
++    assert RP.point_levels(p, phase_poses()) == (7, 3, 0)
++
++
++def test_best_chain_over_every_pre_insert_solution():
++    ik = dict(ALL_IK)
++    ik[2] = [q(1), q(2), q(3)]
++    # start 1 fails at insert, start 2 reaches lift only, start 3 goes all the way
++    ends = {(1, 3): None, (2, 3): 2, (2, 4): None, (3, 3): 3, (3, 4): 3, (3, 5): 3}
++    p = FakePlanner(ik, lambda q0, k: ends[(int(q0[0]), k)])
++    assert RP.point_levels(p, phase_poses()) == (7, 7, 0)
++
++
++def test_stops_trying_starts_once_full():
++    ik = dict(ALL_IK)
++    ik[2] = [q(1), q(2)]
++    p = FakePlanner(ik, lambda q0, k: q0[0])
++    RP.point_levels(p, phase_poses())
++    assert {s for s, _, _ in p.calls} == {1.0}
++
++
++def test_starts_tried_largest_joint_limit_margin_first():
++    ik = dict(ALL_IK)
++    ik[2] = [q(90), q(-50), q(0), q(30)]
++    p = FakePlanner(ik, lambda q0, k: None)
++    RP.point_levels(p, phase_poses())
++    assert [s for s, _, _ in p.calls] == [0.0, 30.0, -50.0, 90.0]
++
++
++def test_best_partial_chain_is_kept():
++    ik = dict(ALL_IK)
++    ik[2] = [q(1), q(2)]
++    ends = {(1, 3): 1, (1, 4): 1, (1, 5): None, (2, 3): None}
++    p = FakePlanner(ik, lambda q0, k: ends[(int(q0[0]), k)])
++    assert RP.point_levels(p, phase_poses()) == (7, 5, 0)
++
++
++def test_timeouts_are_counted():
++    p = FakePlanner(ALL_IK, lambda q0, k: None, timeout=True)
++    assert RP.point_levels(p, phase_poses()) == (7, 3, 1)
++
++
++def test_phase_matrices_are_flange_poses_in_metres_radians():
++    point = (0.1, 0.7, 0.2)
++    Ts = RP.phase_matrices(point)
++    P = RP.RV.flange_poses(point)
++    assert len(Ts) == 7
++    for T, p in zip(Ts, P):
++        np.testing.assert_allclose(T[:3, 3], p[:3] / 1e3, atol=1e-12)
++        np.testing.assert_allclose(T[:3, 2], [0, 1, 0], atol=1e-12)    # flange z = base +Y
++        np.testing.assert_allclose(T[:3, 1], [0, 0, 1], atol=1e-12)    # flange y = base +Z
++
++
++def test_column_levels_shapes():
++    p = FakePlanner(ALL_IK, lambda q0, k: 10 * k)
++    ik, lv, to = RP.column_levels(p, 0.0, 0.5, [0.0, 0.1, 0.2], "hold")
++    assert ik.dtype == np.int8 and lv.dtype == np.int8
++    np.testing.assert_array_equal(ik, [7, 7, 7])
++    np.testing.assert_array_equal(lv, [7, 7, 7])
++    assert to == 0
++
++
++@pytest.mark.parametrize("mode", ["raise", "hold", "jump"])
++def test_modes_accepted(mode):
++    p = FakePlanner(ALL_IK, lambda q0, k: 10 * k)
++    assert RP.point_levels(p, phase_poses(), mode=mode)[1] == 7
+diff --git a/tests/unit/test_reach_volume_tm.py b/tests/unit/test_reach_volume_tm.py
+new file mode 100644
+index 0000000..3bad64d
+--- /dev/null
++++ b/tests/unit/test_reach_volume_tm.py
+@@ -0,0 +1,78 @@
++"""Offline tests for reach_volume_tm (no controller needed)."""
++from __future__ import annotations
++
++import os
++import sys
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "reach_volume"))
++
++import reach_volume_tm as RV  # noqa: E402
++
++
++def test_flange_poses_match_spec_table():
++    L, zc, x = 0.7, 0.2, -0.3
++    P = RV.flange_poses((x, L, zc))
++    # spec Section 3: (approach distance, height) per action, metres
++    want = [(L - 0.394217, zc - 0.075155), (L - 0.321017, zc - 0.075155),
++            (L - 0.331, zc + 0.07725), (L - 0.081, zc + 0.07725),
++            (L - 0.081, zc + 0.09850), (L - 0.331, zc + 0.09850), (L - 0.331, zc + 0.09850)]
++    np.testing.assert_allclose(P[:, 0], x * 1e3)                      # lateral offset 0
++    np.testing.assert_allclose(P[:, 1:3], np.array(want) * 1e3, atol=1e-9)
++    np.testing.assert_allclose(P[:, 3:], [[90, 0, 180]] * 7)
++
++
++def test_orientation_axes():
++    """TM Euler RX,RY,RZ = Rz @ Ry @ Rx; flange z = +Y, y = +Z, x = -X."""
++    rx, ry, rz = np.radians(RV.RPY)
++    Rx = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
++    Ry = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
++    Rz = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
++    R = Rz @ Ry @ Rx
++    np.testing.assert_allclose(R[:, 0], [-1, 0, 0], atol=1e-12)
++    np.testing.assert_allclose(R[:, 1], [0, 0, 1], atol=1e-12)
++    np.testing.assert_allclose(R[:, 2], [0, 1, 0], atol=1e-12)
++
++
++def test_carry_equals_withdraw_and_distinct_phases():
++    P = RV.flange_poses((0.0, 0.5, 0.0))
++    np.testing.assert_array_equal(P[6], P[5])
++    assert len({tuple(p) for p in P[:RV.DISTINCT]}) == RV.DISTINCT
++
++
++def test_decode_column_maps_6_to_7_and_splits():
++    payload = np.array([0, 3, 6, 6, 0, 3, 2, 6], dtype="<i4").tobytes()
++    ik, lc = RV.decode_column(payload, 4, collision=True)
++    np.testing.assert_array_equal(ik, [0, 3, 7, 7])
++    np.testing.assert_array_equal(lc, [0, 3, 2, 7])
++    ik2, lc2 = RV.decode_column(payload, 4, collision=False)
++    np.testing.assert_array_equal(lc2, ik2)
++
++
++def test_decode_column_rejects_wrong_length():
++    with pytest.raises(ValueError):
++        RV.decode_column(np.zeros(3, dtype="<i4").tobytes(), 4, collision=False)
++
++
++def test_column_script_uses_given_column():
++    s = RV.column_script(0.1, 0.65, [-0.05, 0.0], collision=False)
++    assert "float rvX = 100.0000" in s and "float rvY = 650.0000" in s
++    assert "{-50.0000,0.0000}" in s and "CollisionCheck" in s     # guarded by acol=false
++    assert "bool acol = false" in s
++    assert s.rstrip().endswith("}") and "ListenSend(90, rvLV)" in s
++
++
++def test_import_does_not_need_the_controller_client():
++    """The phase setting is reused offline (reach_volume_planner): no tm_eval / robot import."""
++    import subprocess
++    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "reach_volume")
++    code = ("import sys; sys.path.insert(0, sys.argv[1]); import reach_volume_tm; "
++            "bad = [m for m in ('tm_eval', 'robot') if m in sys.modules]; sys.exit(str(bad) if bad else 0)")
++    r = subprocess.run([sys.executable, "-c", code, here], capture_output=True, text=True)
++    assert r.returncode == 0, r.stderr
++
++
++def test_axis_counts_match_spec():
++    assert (len(RV.axis(-1.2, 1.2, 0.05)), len(RV.axis(0.0, 1.4, 0.05))) == (49, 29)
